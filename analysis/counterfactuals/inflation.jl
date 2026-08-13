@@ -1,51 +1,50 @@
 # Import Function 
-cd()
-include("functions_pwbm_w_spouse.jl")
-# Packages Needed 
+include("C:/Users/kchanwong/Documents/PWBM/julia_port/functions_pwbm_w_spouse.jl")
+# Packages Needed
 using DataFrames
 using Plots
 using XLSX
-using CSV;
-# Solve steady state
-par = create_params()
-ss  = solve_steady_state(par);
-# Baseline Dependency Path #
-dep_path = CSV.read("C:/Users/kchanwong/Documents/PWBM/julia_port/dep_rat.csv", DataFrame) |> DataFrame
+using CSV
+using JLD2;
+@load "C:/Users/kchanwong/Documents/PWBM/julia_port/cached_objects.jld2" ss dep_fit
 proj = project_economy(
     ss,
     n_years         = 75,
     start_year      = 2025,
-    g_A             = 0.0113,
-    g_pop           = 0.05,
+    g_A             = 0.0114,
+    g_pop           = 0.005,
     inflation       = 0.024,
-    dep_path        = 0.9 * dep_path.dep_rat,
+    dep_path        = dep_fit,
     ss_cola         = "wage",
-    trust_fund_init = 2.76e12,
-    trust_fund_rate = 0.047
+    trust_fund_init = 2.8e12,
+    trust_fund_rate = 0.047,
+    gdp_anchor      = 28e12
 );
 proj_ADD05 = project_economy(
     ss,
     n_years         = 75,
     start_year      = 2025,
-    g_A             = 0.0113,
-    g_pop           = 0.05,
+    g_A             = 0.0114,
+    g_pop           = 0.005,
     inflation       = 0.029,
-    dep_path        = 0.9 * dep_path.dep_rat,
+    dep_path        = dep_fit,
     ss_cola         = "wage",
-    trust_fund_init = 2.76e12,
-    trust_fund_rate = 0.047
+    trust_fund_init = 2.8e12,
+    trust_fund_rate = 0.047,
+    gdp_anchor      = 28e12
 );
 proj_ADD1 = project_economy(
     ss,
     n_years         = 75,
     start_year      = 2025,
-    g_A             = 0.0113,
-    g_pop           = 0.05,
+    g_A             = 0.0114,
+    g_pop           = 0.005,
     inflation       = 0.034,
-    dep_path        = 0.9 * dep_path.dep_rat,
+    dep_path        = dep_fit,
     ss_cola         = "wage",
-    trust_fund_init = 2.76e12,
-    trust_fund_rate = 0.047);
+    trust_fund_init = 2.8e12,
+    trust_fund_rate = 0.047,
+    gdp_anchor      = 28e12);
 plot(proj.year, 100 * proj.ss_cash_flow_nom./proj.taxable_payroll_nom, label = "Baseline", xlabel = "Year", 
 ylabel = "% of Taxable Payroll", title = "Projected Outlays",
 ylim = (-7, 0))

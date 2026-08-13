@@ -7,14 +7,45 @@ using XLSX
 using CSV
 using JLD2;
 @load "C:/Users/kchanwong/Documents/PWBM/julia_port/cached_objects.jld2" ss dep_fit
+chained_cpi = 0.021
 
-# Reform #
-par_reform = create_params()
-par_reform[:first_rr] = 0.411
-par_reform[:second_rr] = 0.146
-par_reform[:third_rr] = 0.069
-ss_reform = solve_steady_state(par_reform);
-#
+### Current Law (baseline) -- no reform, plain create_params() ###
+par_baseline = create_params()
+### Scenario 1: Raise Retirement Age (FRA indexed to life expectancy,
+### +1 month per 2 years after 2037, reaching 70 by long run) ###
+year_cal_full = collect(2025:2099)
+fra_path = [yr < 2029 ? 67.0 :
+            yr < 2037 ? 67.0 + 3.0 * (yr - 2029) / 8 :
+            70.0 + (yr - 2037) / 24
+            for yr in year_cal_full]
+# Each year, dep ratio scales by (J_max - FRA(t)) / (FRA(t) - J_start) relative to FRA=67 baseline
+dep_path_le = [dep_fit[t] *
+               ((100 - fra_path[t]) * (67 - 21)) /
+               ((100 - 67)          * (fra_path[t] - 21))
+               for t in 1:75]
+par_ra = create_params()
+par_ra[:J_retire] = 70
+ss_ra = solve_steady_state(par_ra);
+
+par_priceindex = create_params(benefit_fn = benefits_price_index_floor)
+par_priceindex[:first_rr] = 0.90 * 0.473
+par_priceindex[:second_rr] = 0.32 * 0.473
+par_priceindex[:third_rr] = 0.15 * 0.473
+ss_priceindex  = solve_steady_state(par_priceindex);
+
+
+benefits_price_index_floor
+### Scenario 4: All reforms combined -- Raise RAs + Price Indexing/125% FPL
+### floor together in ONE steady state (both change par/benefit_fn, so they
+### must be solved jointly, not composed from the separate ss_ra/ss_priceindex
+### solves above). COLA Cap adds no steady-state change, so it's layered on
+### at the projection-call level below, same as the standalone scenario. ###
+par_combined = create_params(benefit_fn = benefits_price_index_floor)
+par_combined[:J_retire] = 70
+ss_combined  = solve_steady_state(par_combined);
+
+
+
 function project_economy_indexed(
     ss;
     n_years::Int          = 75,
@@ -38,7 +69,16 @@ function project_economy_indexed(
     pia_factor_indexing::Bool = false,
     cola_inflation        = nothing,  # separate price series for SS COLA only; if nothing, uses inflation
     gdp_anchor            = nothing,  # if set, rescale N_hh so year-1 GDP = gdp_anchor
-    wages_to_gdp::Float64 = 0.46      # wages & salaries as share of GDP (empirical calibration)
+    wages_to_gdp::Float64 = 0.46,     # wages & salaries as share of GDP (empirical calibration)
+    # COLA raise cap (CRFB-style COLA Cap): the dollar SIZE of each year's
+    # COLA raise on the existing benefit stock is capped at
+    # chained_cpi * cola_cap_pct * FPL(t), FPL(t) = fpl_single_2025 grown at
+    # chained_cpi. New claimants entering that year are unaffected -- they
+    # aren't receiving a "raise", they're entering fresh at new_ben_real_t.
+    cola_cap::Bool             = false,
+    chained_cpi::Float64       = 0.021,
+    fpl_single_2025::Float64   = 15650.0,
+    cola_cap_pct::Float64      = 1.25
 )
     @printf("=== Projecting %d years: %d-%d [%s] ===\n",
             n_years, start_year, start_year+n_years-1, label)
@@ -120,6 +160,18 @@ function project_economy_indexed(
             format_comma(cap_base_dollars),
             format_comma(cap_nom_vec[min(10,n_years)]),
             format_comma(cap_nom_vec[n_years]), n_years)
+
+    # COLA raise cap: max dollar increase anyone can get in year t, regardless
+    # of their own benefit size. FPL(t) = fpl_single_2025 grown at chained_cpi
+    # (t=1 is start_year, so exponent is t-1).
+    fpl_path_t          = [fpl_single_2025 * (1.0 + chained_cpi)^(t-1) for t in 1:n_years]
+    cola_cap_dollar_vec  = chained_cpi .* cola_cap_pct .* fpl_path_t
+    if cola_cap
+        @printf("  COLA raise cap: \$%s/yr -> \$%s/yr (yr 10) -> \$%s/yr (yr %d)\n",
+                format_comma(round(cola_cap_dollar_vec[1])),
+                format_comma(round(cola_cap_dollar_vec[min(10,n_years)])),
+                format_comma(round(cola_cap_dollar_vec[n_years])), n_years)
+    end
 
     cum_new_ben = ones(n_years)
     if ss_cola == "wage"
@@ -294,7 +346,20 @@ function project_economy_indexed(
         # SS outlays
         phi_t          = max(0, 1.0 / (working_years * dep_t))
         new_ben_real_t = base.ss_ben_per_retiree * cum_new_ben[t] * new_ben_scale_t
-        avg_ben_real   = (1.0-phi_t)*avg_ben_real + phi_t*new_ben_real_t
+
+        # COLA raise cap on the EXISTING benefit stock only (new claimants
+        # enter fresh at new_ben_real_t, no "raise" to cap). The stock's COLA
+        # raise this year, in nominal $, is driven by cum_cola_price_lag[t]
+        # growing vs. last period; cap that dollar increase, then convert the
+        # capped nominal level back to real/mu units before blending in the
+        # new-claimant share.
+        existing_ben_nom_prev = avg_ben_real * mu * cum_cola_price_lag[max(t-1,1)]
+        existing_ben_nom_raw  = avg_ben_real * mu * cum_cola_price_lag[t]
+        raw_raise_nom_t       = existing_ben_nom_raw - existing_ben_nom_prev
+        raise_nom_t           = cola_cap ? min(raw_raise_nom_t, cola_cap_dollar_vec[t]) : raw_raise_nom_t
+        existing_ben_real_t   = (existing_ben_nom_prev + raise_nom_t) / (mu * cum_cola_price_lag[t])
+
+        avg_ben_real   = (1.0-phi_t)*existing_ben_real_t + phi_t*new_ben_real_t
         avg_ben_nom    = avg_ben_real * mu * cum_cola_price_lag[t]
         n_ret_t        = dep_t * ssa_covered_workers * cum_pop[t]
         ss_outlays_nom_t = avg_ben_nom * n_ret_t
@@ -388,6 +453,32 @@ function project_economy_indexed(
     end
     !isnothing(cf_def) && @printf("  Cash-flow deficit:   %d\n", cf_def)
 
+    # --- Actuarial score (SSA-style), same PV methodology as project_economy
+    # in functions_pwbm_w_spouse.jl ---
+    disc     = [1.0 / (1.0 + trust_fund_rate)^(t-1) for t in 1:n_years]
+    pv_tp    = sum(taxable_payroll_nom .* disc)
+    tf_start = trust_fund_init / 1e9
+    pv_noninc = sum((fica_revenue_nom .+ ss_benefit_tax_oasi_nom) .* disc)
+    pv_cost  = sum(ss_outlays_nom .* disc)
+    pv_tgt   = ss_outlays_nom[n_years] * disc[n_years]
+    actuarial_balance_pct = (tf_start + pv_noninc - pv_cost - pv_tgt) / max(pv_tp, 1e-10) * 100.0
+    annual_balance_75_pct = ss_cash_flow_pct[n_years]
+
+    println("\n--- SSA Score [$label] ---")
+    @printf("  Long-range actuarial balance: %+.2f%% of taxable payroll\n",
+            actuarial_balance_pct)
+    @printf("  Annual balance in 75th year:  %+.2f%% of taxable payroll\n",
+            annual_balance_75_pct)
+
+    # Deficit eliminated = this run's OWN long-range actuarial balance is
+    # non-negative (75-yr present-value solvent) -- the strict criterion, same
+    # as project_economy. Not the same as "TF never goes negative": a reform
+    # can be PV-solvent overall while still dipping negative for a while, or
+    # vice versa depending on timing/discounting.
+    deficit_eliminated = actuarial_balance_pct >= 0.0
+    @printf("  Deficit eliminated (actuarial balance >= 0): %s\n",
+            deficit_eliminated ? "YES" : "NO")
+
     # --- Year-by-year table ---
     show_t = sort(unique(filter(t -> t <= n_years, [1,2,3,5,10,15,20,25,30,40,50,75])))
     println("\n--- Year-by-Year Projection [$label] (selected years) ---")
@@ -437,18 +528,117 @@ function project_economy_indexed(
      debt_to_gdp=debt_to_gdp_v,
      depletion_year=depl,
      cashflow_deficit_year=cf_def,
+     actuarial_balance_pct=actuarial_balance_pct,
+     annual_balance_75_pct=annual_balance_75_pct,
+     deficit_eliminated=deficit_eliminated,
      convergence_rate=conv_rate,
      label=label)
 end;
-proj_w_cpi = project_economy_indexed(ss, ss_reform=ss_reform, reform_year=2026,
-    n_years = 75, start_year = 2025, g_A = 0.0114, g_pop = 0.005, inflation = 0.024,
-    dep_path = dep_fit, ss_cola = "wage", trust_fund_init = 2.8e12,
-    trust_fund_rate = 0.047, pia_factor_indexing = true, gdp_anchor = 28e12);
-proj_w_c_cpi = project_economy_indexed(ss, ss_reform=ss_reform, reform_year=2026,
-    n_years = 75, start_year = 2025, g_A = 0.0114, g_pop = 0.005, inflation = 0.024,
-    dep_path = dep_fit, ss_cola = "wage", trust_fund_init = 2.8e12,
-    trust_fund_rate = 0.047, pia_factor_indexing = true, gdp_anchor = 28e12,
-    scenario_periods = [
-        Dict(:year_start => 2030, :year_end => 2099, :cola_inflation => 0.020)
-    ]
-);
+# ============================================================
+# Score all four scenarios: Current Law (baseline) + 3 standalone reforms
+# ============================================================
+common_args = (n_years = 75, start_year = 2025, g_A = 0.0114, g_pop = 0.005,
+               inflation = 0.024, trust_fund_init = 2.8e12, trust_fund_rate = 0.047,
+               dep_path = dep_fit,
+               gdp_anchor = 28e12)
+
+proj_baseline = project_economy(ss_baseline;
+    common_args..., label = "Current Law (Baseline)");
+
+proj_ra = project_economy(ss_baseline;
+    common_args..., dep_path = dep_path_le,
+    ss_reform = ss_ra, reform_year = 2033,
+    label = "Raise RAs");
+
+
+proj_colacap = project_economy_indexed(ss_baseline;
+    common_args...,
+    ss_reform = ss_baseline, reform_year = 2033,
+    ss_cola = chained_cpi, cola_inflation = chained_cpi,
+    cola_cap = true, chained_cpi = chained_cpi,
+    fpl_single_2025 = par_baseline[:fpl_single_2025],
+    cola_cap_pct    = 0.5 * par_baseline[:min_benefit_floor_pct],
+    label = "COLA Cap");
+
+
+n = project_economy_indexed(
+    ss_baseline,
+    ss_reform = ss_priceindex,
+    reform_year      = 2033,
+    ccpiu_start_year = 2033,
+    n_years          = 75,
+    start_year       = 2025,
+    g_A              = 0.0114,
+    g_pop            = 0.005,
+    inflation        = 0.024,
+    dep_path         = dep_fit,
+    ss_cola          = "wage",
+    trust_fund_init  = 2.3e12,
+    trust_fund_rate  = 0.047,
+    gdp_anchor       = 28e12);
+
+# All combined: RA increase (dep_path_le) + Price Indexing/floor
+# (pia_factor_indexing, ss_reform=ss_combined) + COLA Cap (chained-CPI COLA +
+# cola_cap), all at once.
+proj_combined = project_economy_indexed(ss_baseline;
+    common_args...,
+    dep_path = dep_path_le,
+    ss_reform = ss_combined, reform_year = 2033,
+    ccpiu_wedge = 0.0,
+    pia_factor_indexing = true,
+    ss_cola = chained_cpi, cola_inflation = chained_cpi,
+    cola_cap = true, chained_cpi = chained_cpi,
+    fpl_single_2025 = par_baseline[:fpl_single_2025],
+    cola_cap_pct    = 0.5 * par_baseline[:min_benefit_floor_pct],
+    label = "All Reforms Combined");
+
+# --- Table 2-style comparison: 75-Yr Balance, Delta vs Baseline, Shortfall Closed ---
+scenarios = [
+    ("Current Law (Baseline)", proj_baseline, nothing),
+    ("Raise RAs",              proj_ra,       proj_baseline),
+    ("COLA Cap",               proj_colacap,  proj_baseline),
+    ("Price Indexing / 125% FPL Minimum Benefit", proj_priceindex, proj_baseline),
+    ("All Reforms Combined",   proj_combined, proj_baseline),
+]
+
+println("\n=== Table 2: Actuarial Balance Comparison — All Scenarios (% of taxable payroll) ===")
+@printf("  %-42s %12s %14s %18s\n", "Scenario", "75-Yr Balance", "Δ vs Baseline", "75-Yr Shortfall Closed")
+println("  " * repeat("-", 90))
+for (name, proj, base) in scenarios
+    bal = proj.actuarial_balance_pct
+    if isnothing(base)
+        @printf("  %-42s %11.2f%% %14s %18s\n", name, bal, "—", "—")
+    else
+        base_bal = base.actuarial_balance_pct
+        delta    = bal - base_bal
+        # Shortfall closed only meaningful when baseline itself is in deficit
+        closed   = base_bal < 0.0 ? (delta / abs(base_bal)) * 100.0 : NaN
+        @printf("  %-42s %11.2f%% %+13.2f pp %17.1f%%\n", name, bal, delta, closed)
+    end
+end
+
+# --- Export all four scenarios to Excel: one Projection sheet each + a
+# Summary sheet with the Table 2 comparison ---
+scalar_keys = (:depletion_year, :cashflow_deficit_year, :actuarial_balance_pct,
+               :annual_balance_75_pct, :deficit_eliminated, :label)
+
+function proj_to_df(proj)
+    vector_keys = filter(k -> !(k in scalar_keys), keys(proj))
+    DataFrame([k => getproperty(proj, k) for k in vector_keys]...)
+end
+
+df_table2 = DataFrame(
+    Scenario = [s[1] for s in scenarios],
+    Balance_75yr_pct = [s[2].actuarial_balance_pct for s in scenarios],
+    Delta_vs_Baseline_pp = [isnothing(s[3]) ? missing : s[2].actuarial_balance_pct - s[3].actuarial_balance_pct for s in scenarios],
+    Shortfall_Closed_pct = [isnothing(s[3]) ? missing : (s[3].actuarial_balance_pct < 0.0 ? (s[2].actuarial_balance_pct - s[3].actuarial_balance_pct) / abs(s[3].actuarial_balance_pct) * 100.0 : missing) for s in scenarios],
+)
+
+xlsx_path = "C:/Users/kchanwong/Documents/PWBM/julia_port/ROMINA_IVANE_PWBM_PAPER/new_policies/proj_reform.xlsx"
+XLSX.writetable(xlsx_path, overwrite = true,
+    "Table2_Comparison"    => df_table2,
+    "Baseline_Projection"  => proj_to_df(proj_baseline),
+    "RaiseRAs_Projection"  => proj_to_df(proj_ra),
+    "COLACap_Projection"   => proj_to_df(proj_colacap),
+    "PriceIndex_Projection"=> proj_to_df(proj_priceindex))
+println("\nExported all scenarios to $xlsx_path")

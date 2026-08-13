@@ -1,59 +1,125 @@
-# Import Function 
+# Import Functions
 include("C:/Users/kchanwong/Documents/PWBM/julia_port/functions_pwbm_w_spouse.jl")
 # Packages Needed
 using DataFrames
 using Plots
 using XLSX
 using CSV
+using Statistics
 using JLD2;
 @load "C:/Users/kchanwong/Documents/PWBM/julia_port/cached_objects.jld2" ss dep_fit
-# Solve steady state for the reform scenario
-par_reform = create_params()
-par_reform[:first_rr] = 1.02
-par_reform[:second_rr] = 0
-par_reform[:third_rr] = 0
-ss_reform  = solve_steady_state(par_reform);
-# Custom Project Economy
-function pia_factors(yr)
-    yr < 2029 && return (0.90, 0.32, 0.15)
-    yr >= 2036 && return (1.02, 0.00, 0.00)
-    t = yr - 2029
-    f1 = min(1.02, 0.90 + 0.02*t)
-    f2 = max(0.00, 0.32 - 0.04*t)
-    f3 = max(0.00, 0.15 - 0.03*t)
-    (f1, f2, f3)
+
+# ============================================================
+# NEW BENEFIT FUNCTION: Phase out spousal benefit for top income quintile
+# Households whose combined AIME >= 80th percentile get no spousal top-up.
+# Survivor benefits are unchanged.
+# ============================================================
+
+function benefits_phaseout_top_quintile(AIME1::Float64, AIME2::Float64,
+                                         par::Dict, status::Symbol)
+    PIA1   = compute_PIA(AIME1, par)
+    PIA2   = compute_PIA(AIME2, par)
+    thresh = get(par, :top_quintile_aime_threshold, Inf)
+
+    if status == :couple
+        if (AIME1 + AIME2) >= thresh
+            # Top quintile: no spousal top-up, each gets only own PIA
+            return (PIA1, PIA2)
+        else
+            b1 = PIA1 + max(0.0, 0.5*PIA2 - PIA1)
+            b2 = PIA2 + max(0.0, 0.5*PIA1 - PIA2)
+            return (b1, b2)
+        end
+    elseif status == :survivor1   # spouse 1 alive, spouse 2 dead
+        return (max(PIA1, PIA2), 0.0)
+    elseif status == :survivor2   # spouse 2 alive, spouse 1 dead
+        return (0.0, max(PIA2, PIA1))
+    end
+    (PIA1, PIA2)
 end
 
-function project_economy_flat_benefits(
+# ============================================================
+# SOLVE BASELINE
+# ============================================================
+# ============================================================
+# COMPUTE 80th PERCENTILE OF JOINT AIME FROM BASELINE
+# ============================================================
+par = create_params()
+nz = par[:n_z]
+all_joint_aimes = [
+    ss.hh_list[ict].AIME1[iz1, iz2] + ss.hh_list[ict].AIME2[iz1, iz2]
+    for ict in 1:length(ss.hh_list)
+    for iz1 in 1:nz, iz2 in 1:nz
+]
+quintile_threshold = quantile(all_joint_aimes, 0.80);
+# ============================================================
+# SOLVE REFORM STEADY STATE
+# ============================================================
+par_reform = create_params(benefit_fn = benefits_phaseout_top_quintile)
+par_reform[:n_years] = 40
+par_reform[:J_retire] = 70
+par_reform[:max_iter_equil] = 300
+par_reform[:top_quintile_aime_threshold] = quintile_threshold
+ss_reform = solve_steady_state(par_reform; benefit_fn = benefits_phaseout_top_quintile);
+# ============================================================
+# PROJECT ECONOMY (75-year window)
+# ============================================================
+proj_base = project_economy(
+    ss,
+    n_years         = 75,
+    start_year      = 2025,
+    g_A             = 0.0113,
+    g_pop           = 0.005,
+    inflation       = 0.024,
+    dep_path        = dep_fit,
+    ss_cola         = "wage",
+    trust_fund_init = 2.8e12,
+    trust_fund_rate = 0.047,
+    gdp_anchor      = 28e12
+);
+year_cal_full = collect(2025:2099)
+fra_path = [yr < 2026 ? 67.0 :
+            yr < 2037 ? 67.0 + 3.0 * (yr - 2026) / 8 :
+            70.0 + (yr - 2037) / 24
+            for yr in year_cal_full]
+dep_path_le = [dep_fit[t] *
+               ((100 - fra_path[t]) * (67 - 21)) /
+               ((100 - 67)          * (fra_path[t] - 21))
+               for t in 1:75];
+function project_economy_w_sl(
     ss;
     n_years::Int          = 75,
     start_year::Int       = 2025,
-    g_A::Float64          = 0.0114,
+    g_A::Float64          = 0.012,
     g_pop::Float64        = 0.005,
-    inflation::Float64    = 0.024,
+    inflation::Float64    = 0.025,
+    cola_inflation::Union{Float64,Nothing} = nothing,  # chained CPI etc.; defaults to `inflation`
     dep_path              = nothing,
     ss_cola               = "wage",
     cap_base_dollars::Float64 = 176100.0,
     bracket_indexing::String  = "cpi",
-    trust_fund_init::Float64  = 2.8e12,
-    trust_fund_rate::Float64  = 0.047,
+    trust_fund_init::Float64  = 2.3e12,
+    trust_fund_rate::Float64  = 0.035,
     ss_reform             = nothing,
     reform_year           = nothing,
     label::String         = "Current Law",
     scenario_periods      = nothing,
     thresh_sens::Float64  = 0.3,
-    ccpiu_wedge::Float64  = 0.003,
-    ccpiu_start_year::Int = 2036,
     pia_factor_indexing::Bool = false,
-    gdp_anchor            = nothing,  # if set, rescale N_hh so year-1 GDP = gdp_anchor
-    wages_to_gdp::Float64 = 0.46      # wages & salaries as share of GDP (empirical calibration)
+    gdp_anchor            = nothing,
+    wages_to_gdp::Float64 = 0.46,
+    # --- Mandatory coverage of non-covered state/local workers ---
+    mandate_coverage_year     = nothing,
+    n_uncovered_base::Float64 = 6.5e6,
+    new_covered_earn_ratio::Float64 = 1.0,
+    pia_concavity::Float64    = 0.6,
+    baseline_proj         = nothing
 )
     @printf("=== Projecting %d years: %d-%d [%s] ===\n",
             n_years, start_year, start_year+n_years-1, label)
 
     base = extract_ss_ratios(ss)
     mu   = base.mu_dollar; par = ss.par
-    alpha = par[:alpha]
 
     ssa_covered_workers = 180e6
     N_hh = ssa_covered_workers / base.worker_mass
@@ -68,22 +134,25 @@ function project_economy_flat_benefits(
     @printf("  Implied GDP: \$%.1fT\n",
             base.Y * mu * N_hh / 1e12)
 
-    # --- Steady-state aggregates for transition path ---
-    K_base = ss.K;  L_base = ss.L
-    K_ref  = 0.0;   L_ref  = 0.0
-
     has_reform = !isnothing(ss_reform) && !isnothing(reform_year)
     ref = nothing
     conv_rate = 0.0
+    alpha = par[:alpha]
+
+    K_base = ss.K;  L_base = ss.L
+    K_ref  = 0.0;   L_ref  = 0.0
+
     if has_reform
         ref = extract_ss_ratios(ss_reform)
         K_ref = ss_reform.K;  L_ref = ss_reform.L
         @printf("  Reform at %d\n", reform_year)
         conv_rate = compute_convergence_rate(ss, g_A=g_A)
     end
-    if ccpiu_wedge > 0
-        @printf("  C-CPI-U indexing from %d (wedge=%.1f bp)\n",
-                ccpiu_start_year, ccpiu_wedge*10000)
+
+    has_mandate = !isnothing(mandate_coverage_year)
+    if has_mandate
+        @printf("  Mandatory coverage at %d: %.1fM workers, earn_ratio=%.2f\n",
+                mandate_coverage_year, n_uncovered_base/1e6, new_covered_earn_ratio)
     end
 
     if isnothing(dep_path)
@@ -110,6 +179,18 @@ function project_economy_flat_benefits(
         end
     end
 
+    # COLA inflation measure (e.g., C-CPI-U ≈ CPI-U − 0.3pp)
+    # When cola_inflation is nothing, COLA uses same measure as headline inflation.
+    # When set (e.g. 0.021 for chained CPI vs 0.024 CPI-U), existing retirees'
+    # real benefits erode by the wedge each year.
+    cola_inf_vec = fill(isnothing(cola_inflation) ? inflation : Float64(cola_inflation), n_years)
+    if !isnothing(scenario_periods)
+        for ep in scenario_periods
+            idx = findall(y -> y >= ep[:year_start] && y <= ep[:year_end], year_cal)
+            haskey(ep, :cola_inflation) && (cola_inf_vec[idx] .= ep[:cola_inflation])
+        end
+    end
+
     cum_A     = cumprod([1.0; (1.0 .+ g_A_vec[2:end])])
     cum_pop   = cumprod([1.0; (1.0 .+ g_pop_vec[2:end])])
     cum_price = cumprod([1.0; (1.0 .+ inf_vec[2:end])])
@@ -132,21 +213,6 @@ function project_economy_flat_benefits(
         for t in 2:n_years; cum_new_ben[t] = cum_new_ben[t-1]*(1+rate); end
     end
 
-    # Apply C-CPI-U wedge: slower new-beneficiary indexing after ccpiu_start_year
-    if ccpiu_wedge > 0
-        cum_new_ben_adj = copy(cum_new_ben)
-        for t in 2:n_years
-            if year_cal[t] >= ccpiu_start_year
-                base_growth = cum_new_ben[t] / cum_new_ben[t-1]
-                adj_growth  = base_growth / (1 + ccpiu_wedge)
-                cum_new_ben_adj[t] = cum_new_ben_adj[t-1] * adj_growth
-            else
-                cum_new_ben_adj[t] = cum_new_ben[t]
-            end
-        end
-        cum_new_ben = cum_new_ben_adj
-    end
-
     working_years = par[:J_retire] - par[:J_start]
 
     btax_rate_oasi_base = base.ss_benefit_tax_oasi_per_retiree /
@@ -161,30 +227,6 @@ function project_economy_flat_benefits(
                              max(ref.ss_ben_per_retiree, 1e-12)
     end
 
-    # --- Precompute bend points and average AIME ---
-    b1_mu = par[:ss_bend1] / mu
-    b2_mu = par[:ss_bend2] / mu
-
-    avg_aime_mu = b2_mu
-    pia_base_level = base.ss_ben_per_retiree
-    for _ in 1:20
-        pia_try = 0.90*min(avg_aime_mu, b1_mu) +
-                  0.32*max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
-                  0.15*max(0.0, avg_aime_mu - b2_mu)
-        err = pia_try - pia_base_level
-        mr = avg_aime_mu <= b1_mu ? 0.90 :
-             avg_aime_mu <= b2_mu ? 0.32 : 0.15
-        avg_aime_mu -= err / max(mr, 0.01)
-        avg_aime_mu = max(avg_aime_mu, 0.01)
-    end
-
-    pia_current_law = 0.90*min(avg_aime_mu, b1_mu) +
-                      0.32*max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
-                      0.15*max(0.0, avg_aime_mu - b2_mu)
-
-    @printf("  Avg AIME (model units): %.4f  PIA: %.4f\n", avg_aime_mu, pia_current_law)
-
-    # Output storage
     GDP_real                 = zeros(n_years)
     GDP_nominal              = zeros(n_years)
     avg_earnings_nominal     = zeros(n_years)
@@ -211,6 +253,26 @@ function project_economy_flat_benefits(
     debt_to_gdp_v            = zeros(n_years)
     total_pay_nom            = zeros(n_years)
     pct_above_nom            = zeros(n_years)
+    mandate_fica_nom         = zeros(n_years)
+    mandate_outlays_nom      = zeros(n_years)
+
+    # --- Precompute AIME and bend points for PIA factor indexing ---
+    b1_mu = par[:ss_bend1] / mu
+    b2_mu = par[:ss_bend2] / mu
+    avg_aime_mu = b2_mu
+    pia_base_level = base.ss_ben_per_retiree
+    for _ in 1:20
+        pia_try = 0.90*min(avg_aime_mu, b1_mu) +
+                  0.32*max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
+                  0.15*max(0.0, avg_aime_mu - b2_mu)
+        err = pia_try - pia_base_level
+        mr  = avg_aime_mu <= b1_mu ? 0.90 : avg_aime_mu <= b2_mu ? 0.32 : 0.15
+        avg_aime_mu -= err / max(mr, 0.01)
+        avg_aime_mu  = max(avg_aime_mu, 0.01)
+    end
+    pia_current_law = 0.90*min(avg_aime_mu, b1_mu) +
+                      0.32*max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
+                      0.15*max(0.0, avg_aime_mu - b2_mu)
 
     trust_fund   = trust_fund_init
     avg_ben_real = base.ss_ben_per_retiree
@@ -218,7 +280,7 @@ function project_economy_flat_benefits(
     for t in 1:n_years
         yr  = year_cal[t]
 
-        # === Mankiw-Weinzierl transition path ===
+        # === Transition path (Mankiw-Weinzierl eqs 34-35) ===
         omega = 0.0
         if has_reform && yr >= reform_year
             tau   = Float64(yr - reform_year)
@@ -232,19 +294,18 @@ function project_economy_flat_benefits(
             L_mu = L_base
         end
 
-        # Derive macro aggregates from production function
         Y_mu = K_mu^alpha * L_mu^(1-alpha)
         w_mu = (1-alpha) * (K_mu / L_mu)^alpha
 
-        # Interpolate distributional variables
         interp(bv, rv) = bv + omega * (rv - bv)
-        fica_rate_t      = has_reform ? interp(base.payroll_rate,   ref.payroll_rate)   : base.payroll_rate
-        pct_above_t      = has_reform ? interp(base.pct_above_cap,  ref.pct_above_cap)  : base.pct_above_cap
-        inc_tax_mu       = has_reform ? interp(base.income_tax,     ref.income_tax)     : base.income_tax
+        fica_rate_t      = has_reform ? interp(base.payroll_rate,  ref.payroll_rate)  : base.payroll_rate
+        pct_above_t      = has_reform ? interp(base.pct_above_cap, ref.pct_above_cap) : base.pct_above_cap
+        inc_tax_mu       = has_reform ? interp(base.income_tax,    ref.income_tax)    : base.income_tax
         btax_oasi_rate_t = has_reform ? interp(btax_rate_oasi_base, btax_rate_oasi_ref) : btax_rate_oasi_base
         btax_hi_rate_t   = has_reform ? interp(btax_rate_hi_base,   btax_rate_hi_ref)   : btax_rate_hi_base
+        new_ben_scale_t  = has_reform ?
+            interp(base.ss_ben_per_retiree, ref.ss_ben_per_retiree) / base.ss_ben_per_retiree : 1.0
 
-        # Corporate tax from transition path
         zeta_corp = par[:zeta_income_corp]
         corp_profit_mu = zeta_corp * (Y_mu - w_mu * L_mu - par[:delta] * K_mu)
         corp_tax_mu = par[:tau_statutory_corp] *
@@ -253,39 +314,27 @@ function project_economy_flat_benefits(
 
         dep_t     = dep_path[t]
 
-        # --- Year-specific PIA factors ---
+        # --- PIA factor indexing ---
         if pia_factor_indexing && !isnothing(reform_year) && yr >= reform_year
             t_ref = findfirst(==(reform_year), year_cal)
             price_wage_ratio = isnothing(t_ref) ? 1.0 : cum_A[t_ref] / cum_A[t]
             f1 = 0.90 * price_wage_ratio
             f2 = 0.32 * price_wage_ratio
             f3 = 0.15 * price_wage_ratio
-        else
-            f1, f2, f3 = pia_factors(yr)
+            pia_yr = f1*min(avg_aime_mu, b1_mu) +
+                     f2*max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
+                     f3*max(0.0, avg_aime_mu - b2_mu)
+            new_ben_scale_t = pia_yr / max(pia_current_law, 1e-10)
         end
 
-        # Bend points: AWI-indexed before C-CPI-U switch, CPI-indexed after
-        if ccpiu_wedge > 0 && yr >= ccpiu_start_year
-            b1_t = b1_mu / cum_A[t]
-            b2_t = b2_mu / cum_A[t]
-        else
-            b1_t = b1_mu
-            b2_t = b2_mu
-        end
-
-        pia_yr = f1*min(avg_aime_mu, b1_t) +
-                 f2*max(0.0, min(avg_aime_mu, b2_t) - b1_t) +
-                 f3*max(0.0, avg_aime_mu - b2_t)
-        new_ben_scale_t = pia_yr / max(pia_current_law, 1e-10)
-
-        # === Scale to nominal dollars ===
+        # === Scale model units → nominal dollars ===
         N_hh_t     = N_hh * cum_pop[t]
         GDP_real_t = Y_mu * cum_A[t] * mu * N_hh_t
         GDP_nom_t  = GDP_real_t * cum_price[t]
         avg_earn_t = (w_mu * L_mu / max(base.worker_mass, 1e-10)) *
                      cum_A[t] * mu * cum_price[t]
 
-        # Payroll from transition path
+        # Payroll
         total_pay_nom_t   = wages_to_gdp * GDP_nom_t
         wage_cap_ratio    = cum_wage[t] / (cap_nom_vec[t] / cap_base_dollars)
         pct_above_adj     = max(0, pct_above_t * wage_cap_ratio)
@@ -295,12 +344,47 @@ function project_economy_flat_benefits(
         # SS outlays
         phi_t          = max(0, 1.0 / (working_years * dep_t))
         new_ben_real_t = base.ss_ben_per_retiree * cum_new_ben[t] * new_ben_scale_t
-        avg_ben_real   = (1.0-phi_t)*avg_ben_real + phi_t*new_ben_real_t
+
+        # Existing retirees' real benefits erode when COLA measure < headline CPI.
+        # cola_erosion_t = 1.0 when cola_inflation == inflation (no wedge).
+        # When cola_inflation < inflation (e.g. C-CPI-U), the ratio < 1 and
+        # the stock of existing benefits loses real purchasing power each period.
+        cola_erosion_t = (1.0 + cola_inf_vec[t]) / (1.0 + inf_vec[t])
+        avg_ben_real   = (1.0 - phi_t) * avg_ben_real * cola_erosion_t + phi_t * new_ben_real_t
+
         avg_ben_nom    = avg_ben_real * mu * cum_price_lag[t]
         n_ret_t        = dep_t * ssa_covered_workers * cum_pop[t]
         ss_outlays_nom_t = avg_ben_nom * n_ret_t
 
-        # Benefit taxation with bracket creep
+        # === Mandatory coverage of non-covered state/local workers ===
+        add_fica_t    = 0.0
+        add_outlays_t = 0.0
+        if has_mandate && yr >= mandate_coverage_year
+            tau_m = yr - mandate_coverage_year
+
+            # All newly covered workers pay FICA immediately
+            n_new         = n_uncovered_base * cum_pop[t]
+            earn_new      = avg_earn_t * new_covered_earn_ratio
+            add_taxable   = n_new * earn_new * (1.0 - pct_above_adj)
+            add_fica_t    = fica_rate_t * add_taxable
+
+            # Benefits: AIME diluted by zero-earning pre-mandate years
+            # career_frac = fraction of full career with covered earnings
+            # PIA is concave in AIME → PIA(frac·AIME)/PIA(AIME) ≈ frac^pia_concavity
+            years_covered = min(tau_m, working_years)
+            career_frac   = years_covered / working_years
+            pia_frac      = career_frac ^ pia_concavity
+
+            n_new_ret     = n_new * dep_t
+            add_outlays_t = avg_ben_nom * pia_frac * new_covered_earn_ratio * n_new_ret
+
+            # Inject into flows
+            fica_rev_nom_t    += add_fica_t
+            taxable_pay_nom_t += add_taxable
+            ss_outlays_nom_t  += add_outlays_t
+        end
+
+        # Benefit taxation
         base_frac_oasi   = max(btax_oasi_rate_t / 0.85, 1e-6)
         creep_oasi       = 1.0 / (1 + (1/base_frac_oasi - 1) *
                                   exp(-thresh_sens * log(cum_price[t])))
@@ -315,7 +399,7 @@ function project_economy_flat_benefits(
         ss_btax_hi_nom_t    = btax_hi_adj   * avg_ben_nom * n_ret_t
         ss_btax_total_nom_t = ss_btax_oasi_nom_t + ss_btax_hi_nom_t
 
-        # Trust fund
+        # Trust fund dynamics
         r_nom_t        = (1.0 + par[:r_G]) * (1.0 + inf_vec[t]) - 1.0
         tf_interest_t  = trust_fund > 0 ? trust_fund * trust_fund_rate : 0.0
         ss_cash_flow_t = fica_rev_nom_t + ss_btax_oasi_nom_t - ss_outlays_nom_t
@@ -333,7 +417,6 @@ function project_economy_flat_benefits(
             debt_nom[t-1] * 1e9 * (1 + r_nom_t) +
             (G_nom_t + ss_outlays_nom_t - total_tax_nom_t)
 
-        # Store
         GDP_real[t]                = GDP_real_t / 1e9
         GDP_nominal[t]             = GDP_nom_t  / 1e9
         avg_earnings_nominal[t]    = avg_earn_t
@@ -360,6 +443,8 @@ function project_economy_flat_benefits(
         govt_spending_nom[t]       = G_nom_t / 1e9
         debt_nom[t]                = debt_t  / 1e9
         debt_to_gdp_v[t]           = debt_t  / GDP_nom_t
+        mandate_fica_nom[t]        = add_fica_t / 1e9
+        mandate_outlays_nom[t]     = add_outlays_t / 1e9
     end
 
     dep_yr = findall(v -> v < 0, trust_fund_nom_v)
@@ -370,6 +455,10 @@ function project_economy_flat_benefits(
     # --- Print actuarial summary ---
     windows = filter(w -> w <= n_years, [10, 30, 75])
     println("\n--- Actuarial Summary [$label] ---")
+    if !isnothing(cola_inflation)
+        @printf("  COLA inflation measure: %.1f%% (headline CPI: %.1f%%)\n",
+                cola_inflation*100, inflation*100)
+    end
     @printf("  %-8s %10s %10s %10s %12s %10s\n",
             "Window","FICA(\$B)","Outlays(\$B)","Balance(\$B)","TF End(\$B)","CostRate")
     println(repeat("-", 68))
@@ -388,6 +477,66 @@ function project_economy_flat_benefits(
         @printf("\n  TF solvent through:  %d\n", start_year+n_years-1)
     end
     !isnothing(cf_def) && @printf("  Cash-flow deficit:   %d\n", cf_def)
+
+    # --- Actuarial score (SSA-style) ---
+    disc = [1.0 / (1.0 + trust_fund_rate)^(t-1) for t in 1:n_years]
+    pv_cf      = sum(ss_cash_flow_nom   .* disc)
+    pv_tp      = sum(taxable_payroll_nom .* disc)
+    actuarial_balance_pct = pv_cf / max(pv_tp, 1e-10) * 100.0
+    annual_balance_75_pct = ss_cash_flow_pct[n_years]
+
+    change_lab  = nothing; change_ab75  = nothing
+    score_lab   = nothing; score_ab75   = nothing
+    if !isnothing(baseline_proj)
+        change_lab  = actuarial_balance_pct - baseline_proj.actuarial_balance_pct
+        change_ab75 = annual_balance_75_pct - baseline_proj.annual_balance_75_pct
+        base_lab    = baseline_proj.actuarial_balance_pct
+        base_ab75   = baseline_proj.annual_balance_75_pct
+        score_lab   = base_lab  < 0.0 ? change_lab  / abs(base_lab)  * 100.0 : nothing
+        score_ab75  = base_ab75 < 0.0 ? change_ab75 / abs(base_ab75) * 100.0 : nothing
+
+        println("\n--- SSA Score [$label] ---")
+        @printf("  %-35s %9s   %9s\n", "", "Chg(%pay)", "Elim(%)")
+        println("  " * repeat("-", 57))
+        @printf("  %-35s %+9.2f   %s\n", "Long-range actuarial balance:", change_lab,
+                isnothing(score_lab)  ? "  n/a" : @sprintf("%8.1f%%", score_lab))
+        @printf("  %-35s %+9.2f   %s\n", "Annual balance in 75th year:", change_ab75,
+                isnothing(score_ab75) ? "  n/a" : @sprintf("%8.1f%%", score_ab75))
+    else
+        println("\n--- SSA Score [$label] ---")
+        @printf("  Long-range actuarial balance: %+.2f%% of taxable payroll\n",
+                actuarial_balance_pct)
+        @printf("  Annual balance in 75th year:  %+.2f%% of taxable payroll\n",
+                annual_balance_75_pct)
+    end
+
+    # --- Mandatory coverage summary ---
+    if has_mandate
+        mand_start_idx = findfirst(yr -> yr >= mandate_coverage_year, year_cal)
+        if !isnothing(mand_start_idx)
+            println("\n--- Mandatory Coverage Impact [$label] ---")
+            show_m = sort(unique(filter(t -> t <= n_years && t >= mand_start_idx,
+                [mand_start_idx, mand_start_idx+4, mand_start_idx+9,
+                 mand_start_idx+19, mand_start_idx+29, mand_start_idx+44, n_years])))
+            @printf("  %-6s %10s %10s %10s %8s\n",
+                    "Year", "AddFICA\$B", "AddOut\$B", "Net\$B", "PIA_frac")
+            println(repeat("-", 50))
+            for t in show_m
+                tau_m = year_cal[t] - mandate_coverage_year
+                cf = min(tau_m, working_years) / working_years
+                pf = cf ^ pia_concavity
+                @printf("  %-6d %10.1f %10.1f %10.1f %7.1f%%\n",
+                        year_cal[t],
+                        mandate_fica_nom[t],
+                        mandate_outlays_nom[t],
+                        mandate_fica_nom[t] - mandate_outlays_nom[t],
+                        pf * 100)
+            end
+            total_net = sum(mandate_fica_nom) - sum(mandate_outlays_nom)
+            @printf("  Cumulative net: \$%.1fB over %d years\n",
+                    total_net, n_years - mand_start_idx + 1)
+        end
+    end
 
     # --- Year-by-year table ---
     show_t = sort(unique(filter(t -> t <= n_years, [1,2,3,5,10,15,20,25,30,40,50,75])))
@@ -411,6 +560,7 @@ function project_economy_flat_benefits(
      dep_ratio=dep_path, price_level=cum_price,
      cum_productivity=cum_A, cum_population=cum_pop,
      g_A_annual=g_A_vec, inflation_annual=inf_vec,
+     cola_inflation_annual=cola_inf_vec,
      GDP_real=GDP_real, GDP_nominal=GDP_nominal,
      avg_earnings_nominal=avg_earnings_nominal,
      payroll_cap_nom=payroll_cap_nom,
@@ -436,26 +586,69 @@ function project_economy_flat_benefits(
      govt_spending_nom=govt_spending_nom,
      debt_nom=debt_nom,
      debt_to_gdp=debt_to_gdp_v,
+     mandate_fica_nom=mandate_fica_nom,
+     mandate_outlays_nom=mandate_outlays_nom,
      depletion_year=depl,
      cashflow_deficit_year=cf_def,
-     convergence_rate=conv_rate,
-     label=label)
+     actuarial_balance_pct=actuarial_balance_pct,
+     annual_balance_75_pct=annual_balance_75_pct,
+     change_lab=change_lab,
+     change_ab75=change_ab75,
+     score_lab=score_lab,
+     score_ab75=score_ab75,
+     label=label,
+     convergence_rate=conv_rate)
+end;
+proj_reform = project_economy_w_sl(
+    ss,
+    ss_reform = ss_reform,
+    mandate_coverage_year = 2026,
+    reform_year = 2026,
+    n_years          = 75,
+    start_year       = 2025, 
+    g_A              = 0.0113,
+    g_pop            = 0.005,
+    cola_inflation  = 0.021,       # C-CPI-U ≈ 0.3pp lower
+    label           = "C-CPI-U COLA",
+    inflation        = 0.024,
+    dep_path         = dep_path_le,
+    ss_cola          = "wage",
+    trust_fund_init  = 2.8e12,
+    trust_fund_rate  = 0.047,
+    baseline_proj    = proj_base,
+    gdp_anchor       = 28e12
+);
+# ============================================================
+# EXPORT TO XLSX
+# ============================================================
+
+function proj_to_df(p)
+    DataFrame(
+        year                  = p.year,
+        ss_cash_flow_B        = p.ss_cash_flow_nom,
+        taxable_payroll_nom_B = p.taxable_payroll_nom,
+        ss_outlays_nom_B      = p.ss_outlays_nom,
+        fica_revenue_nom_B    = p.fica_revenue_nom,
+        ss_cost_rate_pct      = p.ss_cost_rate,
+        ss_cash_flow_pct      = p.ss_cash_flow_pct,
+        ss_balance_pct        = p.ss_balance_pct,
+        trust_fund_nom_B      = p.trust_fund_nom,
+        avg_ben_per_retiree_K = p.avg_ben_per_retiree_nom,
+        GDP_nominal_B         = p.GDP_nominal,
+    )
 end
 
-###
-proj = project_economy_flat_benefits(ss,
-    ss_reform       = ss_reform,
-    reform_year     = 2029,
-    n_years         = 75,
-    start_year      = 2025,
-    gdp_anchor      = 28e12,
-    g_A             = 0.0114,
-    g_pop           = 0.005,
-    inflation       = 0.024,
-    dep_path        = dep_fit,
-    ss_cola         = "wage",
-    trust_fund_init = 2.8e12,
-    trust_fund_rate = 0.047,
-    ccpiu_wedge     = 0.003,
-    ccpiu_start_year = 2036,
-    label="Flat Benefit (102/0/0)");
+XLSX.openxlsx("reforms_3_5_2026.xlsx", mode="w") do xf
+    # Baseline sheet
+    sheet = xf[1]
+    XLSX.rename!(sheet, "baseline")
+    df_base = proj_to_df(proj_base)
+    XLSX.writetable!(sheet, df_base)
+
+    # Reform sheet
+    XLSX.addsheet!(xf, "reform")
+    df_reform = proj_to_df(proj_reform)
+    XLSX.writetable!(xf["reform"], df_reform)
+end
+
+println("reforms_3_5_2026.xlsx")
