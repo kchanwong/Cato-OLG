@@ -2,9 +2,8 @@
 # Simulate partial privatisation: divert X% of FICA revenues to private accounts
 # for the first `diversion_years` years. Outlays unchanged; trust fund re-simulated.
 
-include("C:/Users/kchanwong/Documents/PWBM/julia_port/functions_pwbm_w_spouse.jl")
+include(joinpath(@__DIR__, "..", "..", "source", "setup.jl"))
 using DataFrames, XLSX, CSV, Printf, Statistics, JLD2
-@load "C:/Users/kchanwong/Documents/PWBM/julia_port/cached_objects.jld2" ss dep_fit
 
 # ── baseline projection (current law, no reform) ─────────────────────────────
 proj_base = project_economy(ss,
@@ -147,7 +146,7 @@ scenarios = [
 ]
 
 outpath = joinpath(
-    "C:/Users/kchanwong/Documents/PWBM/julia_port/ROMINA_IVANE_PWBM_PAPER/new_policies",
+    joinpath(REPO, "output", "new_policies"),
     "privatization_scenarios.xlsx")
 
 XLSX.openxlsx(outpath, mode="w") do xf

@@ -1,12 +1,11 @@
 # Import Function 
-include("C:/Users/kchanwong/Documents/PWBM/julia_port/functions_pwbm_w_spouse.jl")
+include(joinpath(@__DIR__, "..", "..", "source", "setup.jl"))
 # Packages Needed
 using DataFrames
 using Plots
 using XLSX
 using CSV
 using JLD2;
-@load "C:/Users/kchanwong/Documents/PWBM/julia_port/cached_objects.jld2" ss dep_fit
 proj = project_economy(
     ss,
     n_years         = 75,
@@ -71,7 +70,7 @@ ylabel = "% of Taxable Payroll", title = "Projected Outlays",
 ylim = (-7, 0))
 plot!(proj.year, 100 * proj_STAG1.ss_cash_flow_nom./proj_STAG1.taxable_payroll_nom, lwd = 3, label = "Add 0.5% Inflation");
 plot!(proj.year, 100 * proj_STAG2.ss_cash_flow_nom./proj_STAG2.taxable_payroll_nom, lwd = 3, label = "Add 1% Inflation");
-XLSX.openxlsx("C:/Users/kchanwong/Documents/PWBM/julia_port/projections_stagflation.xlsx", mode="w") do xf
+XLSX.openxlsx(joinpath(REPO, "output", "projections_stagflation.xlsx"), mode="w") do xf
 for (name, p) in [("Baseline", proj), ("STAG1", proj_STAG1), ("STAG2", proj_STAG2)]
         sheet = XLSX.addsheet!(xf, name)
         # Header row

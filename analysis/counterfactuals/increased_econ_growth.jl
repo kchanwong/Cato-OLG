@@ -1,5 +1,5 @@
 # Import Function 
-include("C:/Users/kchanwong/Documents/PWBM/julia_port/functions_pwbm_w_spouse.jl")
+include(joinpath(@__DIR__, "..", "..", "source", "setup.jl"))
 # Packages Needed
 using DataFrames
 using Plots
@@ -7,7 +7,6 @@ using XLSX
 using CSV
 using Optim;
 # Save ss and dep_fit to cache for use by all other scripts
-@load "C:/Users/kchanwong/Documents/PWBM/julia_port/cached_objects.jld2" ss dep_fit
 
 proj = project_economy(
     ss,
@@ -131,7 +130,7 @@ proj_ADD1 = project_economy(
     gdp_anchor      = 28e12
 );
 ### Export ###
-XLSX.openxlsx("C:/Users/kchanwong/Documents/PWBM/julia_port/projections_gdp_increase.xlsx", mode="w") do xf
+XLSX.openxlsx(joinpath(REPO, "output", "projections_gdp_increase.xlsx"), mode="w") do xf
     for (name, p) in [("Baseline", proj), ("Add0_5pct", proj_ADD0_5), ("Add1pct", proj_ADD1)]
         sheet = XLSX.addsheet!(xf, name)
         # Header row

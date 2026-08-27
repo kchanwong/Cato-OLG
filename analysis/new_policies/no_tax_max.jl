@@ -1,12 +1,11 @@
 # Import Function 
-include("C:/Users/kchanwong/Documents/PWBM/julia_port/functions_pwbm_w_spouse.jl")
+include(joinpath(@__DIR__, "..", "..", "source", "setup.jl"))
 # Packages Needed
 using DataFrames
 using Plots
 using XLSX
 using CSV
 using JLD2;
-@load "C:/Users/kchanwong/Documents/PWBM/julia_port/cached_objects.jld2" ss dep_fit
 # Increase Payroll Tax Rate #
 par_reform = create_params()
 par_reform[:payroll_tax_rate] = 100000000
@@ -65,7 +64,7 @@ function proj_to_df(p)
     )
 end;
 compare_projections(proj_static, proj_no_tax_max, proj_baseline)
-const outpath_rr = "C:/Users/kchanwong/Documents/PWBM/julia_port/ROMINA_IVANE_PWBM_PAPER/new_policies/revenue_raisers.xlsx"
+const outpath_rr = joinpath(REPO, "output", "new_policies", "revenue_raisers.xlsx")
 XLSX.openxlsx(outpath_rr, mode="rw") do xf
     sheet = xf[1]
     XLSX.rename!(sheet, "proj_no_tax_max")

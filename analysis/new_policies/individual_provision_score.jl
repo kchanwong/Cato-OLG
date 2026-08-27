@@ -1,7 +1,6 @@
 # Import Function
-include("C:/Users/kchanwong/Documents/PWBM/julia_port/functions_pwbm_w_spouse.jl")
+include(joinpath(@__DIR__, "..", "..", "source", "setup.jl"))
 using DataFrames, Plots, XLSX, CSV, Statistics, JLD2;
-@load "C:/Users/kchanwong/Documents/PWBM/julia_port/cached_objects.jld2" ss dep_fit
 ss_base = ss
 ### For ALL ###
 par_reform = create_params()
