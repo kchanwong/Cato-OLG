@@ -12,15 +12,15 @@
 #     - Earnings sharing
 #     - Caregiver credits
 #
-# Dependencies:
-#   using Pkga
-#   Pkg.add(["Distributions", "Printf", "Statistics", "LinearAlgebra"])
+# Dependencies: see README.md ("Setup"). Load this file via source/setup.jl,
+# which also loads the cached baseline steady state.
 # ============================================================
 
 using Distributions
 using Printf
 using Statistics
 using LinearAlgebra
+using Optim          # fit_dep_path_vector only
 using Base.Threads
 
 # ============================================================
@@ -1311,92 +1311,6 @@ function compute_aggregates_couples(par::Dict, grids::NamedTuple,
 end
 
 # ============================================================
-# PAYROLL STATS
-# ============================================================
-
-function payroll_stats_couples(par::Dict, grids::NamedTuple,
-                               hh_list::Vector, x_list::Vector,
-                               prices::Dict)
-    n_ct = length(hh_list)
-    nz = par[:n_z]; na = par[:n_a]; nj = par[:n_ages]
-    Jr = par[:J_retire] - par[:J_start] + 1
-    zg = grids.z_grid; ag = grids.a_grid
-    cap = par[:ss_cap_frac] * par[:avg_wage_mu]
-
-    nt = Threads.maxthreadid()
-    tot_t = zeros(nt); tax_t = zeros(nt); nw_t = zeros(nt)
-
-    @threads for ict in 1:n_ct
-        tid = threadid()
-        ct  = par[:couple_types][ict]
-        wp  = ct[:weight]; zp1 = ct[:zp1]; zp2 = ct[:zp2]
-        hh  = hh_list[ict]; xd = x_list[ict]
-
-        # Couple payroll
-        for j in 1:nj
-            j >= Jr && continue
-            for iz1 in 1:nz, iz2 in 1:nz
-                zv1 = exp(zg[iz1] + zp1 + grids.age_eff[j])
-                zv2 = exp(zg[iz2] + zp2 + grids.age_eff[j])
-                for ia in 1:na
-                    m = xd.x_c[ia,iz1,iz2,j] * wp
-                    m < 1e-15 && continue
-                    yl1 = prices[:w]*zv1*hh.couple.pol_n1[ia,iz1,iz2,j]
-                    yl2 = prices[:w]*zv2*hh.couple.pol_n2[ia,iz1,iz2,j]
-                    if yl1 > 1e-10
-                        tot_t[tid] += yl1 * m
-                        tax_t[tid] += min(yl1, cap) * m
-                        nw_t[tid]  += m
-                    end
-                    if yl2 > 1e-10
-                        tot_t[tid] += yl2 * m
-                        tax_t[tid] += min(yl2, cap) * m
-                        nw_t[tid]  += m
-                    end
-                end
-            end
-        end
-
-        # Survivor1 payroll
-        for j in 1:nj
-            j >= Jr && continue
-            for iz1 in 1:nz
-                zv1 = exp(zg[iz1] + zp1 + grids.age_eff[j])
-                for ia in 1:na
-                    m = xd.x_s1[ia,iz1,j] * wp
-                    m < 1e-15 && continue
-                    yl1 = prices[:w]*zv1*hh.surv1.pol_n[ia,iz1,j]
-                    tot_t[tid] += yl1 * m
-                    tax_t[tid] += min(yl1,cap) * m
-                    nw_t[tid]  += m
-                end
-            end
-        end
-
-        # Survivor2 payroll
-        for j in 1:nj
-            j >= Jr && continue
-            for iz2 in 1:nz
-                zv2 = exp(zg[iz2] + zp2 + grids.age_eff[j])
-                for ia in 1:na
-                    m = xd.x_s2[ia,iz2,j] * wp
-                    m < 1e-15 && continue
-                    yl2 = prices[:w]*zv2*hh.surv2.pol_n[ia,iz2,j]
-                    tot_t[tid] += yl2 * m
-                    tax_t[tid] += min(yl2,cap) * m
-                    nw_t[tid]  += m
-                end
-            end
-        end
-    end
-
-    tot = sum(tot_t); tax = sum(tax_t); nw = sum(nw_t)
-    (total=tot, taxable=tax, n_workers=nw,
-     avg_earn=tot/max(nw,1e-10),
-     pct_above=1.0-tax/max(tot,1e-10))
-end
-
-# ============================================================
 # PARAMETERS
 # ============================================================
 
@@ -1623,10 +1537,9 @@ function solve_steady_state(par::Dict;
         ps = payroll_stats_couples(par, grids, hh_list, x_list, prices)
         par[:mu_dollar]   = par[:target_avg_earn] / max(ps.avg_earn, 1e-10)
         par[:avg_wage_mu] = ps.avg_earn
-        # Real-dollar-denominated params must be recomputed whenever mu_dollar
-        # is recalibrated, or they go stale relative to the final equilibrium
-        # (both were previously only set once, at create_params() time, using
-        # the initial mu_dollar guess).
+        # Params denominated in real dollars must be recomputed whenever
+        # mu_dollar is recalibrated, or they go stale relative to the final
+        # equilibrium.
         par[:spousal_cap] = compute_PIA(7.25*2080/12/par[:mu_dollar], par)
         haskey(par, :fpl_single_2025) && (par[:min_benefit_floor] =
             par[:min_benefit_floor_pct] * par[:fpl_single_2025] / par[:mu_dollar])
@@ -1858,6 +1771,9 @@ function project_economy(
     end
     length(dep_path) < n_years &&
         (dep_path = vcat(dep_path, fill(dep_path[end], n_years - length(dep_path))))
+    # Every returned series has n_years elements, so trim as well as pad.
+    # The cached dep_fit has 76 elements and n_years is usually 75.
+    dep_path = dep_path[1:n_years]
 
     year_cal  = collect(start_year:(start_year+n_years-1))
     g_A_vec   = fill(g_A,       n_years)
@@ -2288,7 +2204,7 @@ function static_score_economy(
     gdp_anchor                 = nothing,
     wages_to_gdp::Float64      = 0.46,
     baseline_proj              = nothing,
-    eliminates_cap::Bool       = false,   # ← NEW: set true for full cap-elimination reforms
+    eliminates_cap::Bool       = false,   # Set true for full cap-elimination reforms.
 )
     @printf("=== Static Scoring %d years: %d-%d [%s] ===\n",
             n_years, start_year, start_year + n_years - 1, label)
@@ -2392,6 +2308,9 @@ function static_score_economy(
     end
     length(dep_path) < n_years &&
         (dep_path = vcat(dep_path, fill(dep_path[end], n_years - length(dep_path))))
+    # Every returned series has n_years elements, so trim as well as pad.
+    # The cached dep_fit has 76 elements and n_years is usually 75.
+    dep_path = dep_path[1:n_years]
 
     GDP_real                 = zeros(n_years)
     GDP_nominal              = zeros(n_years)

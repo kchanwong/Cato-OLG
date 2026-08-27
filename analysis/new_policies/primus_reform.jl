@@ -1,12 +1,11 @@
 # Import Function 
-include("C:/Users/kchanwong/Documents/PWBM/julia_port/functions_pwbm_w_spouse.jl")
+include(joinpath(@__DIR__, "..", "..", "source", "setup.jl"))
 # Packages Needed
 using DataFrames
 using Plots
 using XLSX
 using CSV
 using JLD2;
-@load "C:/Users/kchanwong/Documents/PWBM/julia_port/cached_objects.jld2" ss dep_fit
 chained_cpi = 0.021
 
 ### Current Law (baseline) -- no reform, plain create_params() ###
@@ -634,7 +633,7 @@ df_table2 = DataFrame(
     Shortfall_Closed_pct = [isnothing(s[3]) ? missing : (s[3].actuarial_balance_pct < 0.0 ? (s[2].actuarial_balance_pct - s[3].actuarial_balance_pct) / abs(s[3].actuarial_balance_pct) * 100.0 : missing) for s in scenarios],
 )
 
-xlsx_path = "C:/Users/kchanwong/Documents/PWBM/julia_port/ROMINA_IVANE_PWBM_PAPER/new_policies/proj_reform.xlsx"
+xlsx_path = joinpath(REPO, "output", "new_policies", "proj_reform.xlsx")
 XLSX.writetable(xlsx_path, overwrite = true,
     "Table2_Comparison"    => df_table2,
     "Baseline_Projection"  => proj_to_df(proj_baseline),

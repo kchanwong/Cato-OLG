@@ -1,12 +1,11 @@
 # Import Function 
-include("C:/Users/kchanwong/Documents/PWBM/julia_port/functions_pwbm_w_spouse.jl");
+include(joinpath(@__DIR__, "..", "..", "source", "setup.jl"))
 # Packages Needed
 using DataFrames
 using Plots
 using XLSX
 using CSV
 using JLD2;
-@load "C:/Users/kchanwong/Documents/PWBM/julia_port/cached_objects.jld2" ss dep_fit
 # Increase Payroll Tax Rate #
 par_reform = create_params()
 par_reform[:payroll_rate] = 0.17
@@ -42,7 +41,7 @@ ss_reform
 
 print(proj_raise_payroll.ss_cash_flow_pct)
 
-const outpath_rr = "C:/Users/kchanwong/Documents/PWBM/julia_port/ROMINA_IVANE_PWBM_PAPER/new_policies/revenue_raisers.xlsx"
+const outpath_rr = joinpath(REPO, "output", "new_policies", "revenue_raisers.xlsx")
 XLSX.openxlsx(outpath_rr, mode="rw") do xf
     sheet = XLSX.addsheet!(xf, "proj_raise_payroll")
     df = proj_to_df(proj_raise_payroll)

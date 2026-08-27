@@ -1,12 +1,11 @@
 # Import Function 
-include("C:/Users/kchanwong/Documents/PWBM/julia_port/functions_pwbm_w_spouse.jl")
+include(joinpath(@__DIR__, "..", "..", "source", "setup.jl"))
 # Packages Needed
 using DataFrames
 using Plots
 using XLSX
 using CSV
 using JLD2;
-@load "C:/Users/kchanwong/Documents/PWBM/julia_port/cached_objects.jld2" ss dep_fit
 
 function benefits_no_credit(AIME1::Float64, AIME2::Float64,
                              par::Dict, status::Symbol)
@@ -111,7 +110,7 @@ proj_static_wc = static_score_economy(ss,
     trust_fund_init  = 2.3e12,
     trust_fund_rate  = 0.047,
     gdp_anchor       = 28e12);
-const outpath_sd = "C:/Users/kchanwong/Documents/PWBM/julia_port/ROMINA_IVANE_PWBM_PAPER/new_policies/static_dynamic_projections.xlsx"
+const outpath_sd = joinpath(REPO, "output", "new_policies", "static_dynamic_projections.xlsx")
 
 # collect named DataFrames to write
 sheets = Dict(
