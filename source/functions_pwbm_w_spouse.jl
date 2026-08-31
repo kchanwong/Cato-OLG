@@ -12,15 +12,15 @@
 #     - Earnings sharing
 #     - Caregiver credits
 #
-# Dependencies: see README.md ("Setup"). Load this file via source/setup.jl,
-# which also loads the cached baseline steady state.
+# Dependencies:
+#   using Pkga
+#   Pkg.add(["Distributions", "Printf", "Statistics", "LinearAlgebra"])
 # ============================================================
 
 using Distributions
 using Printf
 using Statistics
 using LinearAlgebra
-using Optim          # fit_dep_path_vector only
 using Base.Threads
 
 # ============================================================
@@ -500,11 +500,14 @@ function compute_aime_couples(par::Dict, grids::NamedTuple, prices::Dict,
                               aime_modifier=nothing)
     nz    = par[:n_z]
     Jr    = par[:J_retire] - par[:J_start] + 1
-    n_years = par[:n_years]
+    n_years = get(par, :aime_years, get(par, :n_years, 35))  # AIME top-35 averaging window, NOT a projection horizon
     zg    = grids.z_grid
     cap_b = par[:ss_cap_frac] * par[:avg_wage_mu]
     g_idx = par[:g_A_index]
-    age_60_j = 67 - par[:J_start]
+    # Current law: earnings are AWI-indexed through the year the worker turns
+    # 60 (fixed by statute -- does NOT move with J_retire); later years enter
+    # unindexed. jw maps to age 20+jw, so age 60 is jw = 60 - J_start + 1.
+    age_60_j = 60 - par[:J_start] + 1
     AIME1_by_z = zeros(nz, nz)
     AIME2_by_z = zeros(nz, nz)
 
@@ -947,7 +950,7 @@ function solve_household_couples(par::Dict, grids::NamedTuple, prices::Dict,
                                  benefit_fn::Function=benefits_current_law,
                                  aime_modifier=nothing)
     nz  = par[:n_z]
-    n_years = par[:n_years]
+    n_years = get(par, :aime_years, get(par, :n_years, 35))  # AIME top-35 averaging window, NOT a projection horizon
     Jr  = par[:J_retire] - par[:J_start] + 1
     zg  = grids.z_grid
     cap_b = par[:ss_cap_frac] * par[:avg_wage_mu]
@@ -1311,6 +1314,92 @@ function compute_aggregates_couples(par::Dict, grids::NamedTuple,
 end
 
 # ============================================================
+# PAYROLL STATS
+# ============================================================
+
+function payroll_stats_couples(par::Dict, grids::NamedTuple,
+                               hh_list::Vector, x_list::Vector,
+                               prices::Dict)
+    n_ct = length(hh_list)
+    nz = par[:n_z]; na = par[:n_a]; nj = par[:n_ages]
+    Jr = par[:J_retire] - par[:J_start] + 1
+    zg = grids.z_grid; ag = grids.a_grid
+    cap = par[:ss_cap_frac] * par[:avg_wage_mu]
+
+    nt = Threads.maxthreadid()
+    tot_t = zeros(nt); tax_t = zeros(nt); nw_t = zeros(nt)
+
+    @threads for ict in 1:n_ct
+        tid = threadid()
+        ct  = par[:couple_types][ict]
+        wp  = ct[:weight]; zp1 = ct[:zp1]; zp2 = ct[:zp2]
+        hh  = hh_list[ict]; xd = x_list[ict]
+
+        # Couple payroll
+        for j in 1:nj
+            j >= Jr && continue
+            for iz1 in 1:nz, iz2 in 1:nz
+                zv1 = exp(zg[iz1] + zp1 + grids.age_eff[j])
+                zv2 = exp(zg[iz2] + zp2 + grids.age_eff[j])
+                for ia in 1:na
+                    m = xd.x_c[ia,iz1,iz2,j] * wp
+                    m < 1e-15 && continue
+                    yl1 = prices[:w]*zv1*hh.couple.pol_n1[ia,iz1,iz2,j]
+                    yl2 = prices[:w]*zv2*hh.couple.pol_n2[ia,iz1,iz2,j]
+                    if yl1 > 1e-10
+                        tot_t[tid] += yl1 * m
+                        tax_t[tid] += min(yl1, cap) * m
+                        nw_t[tid]  += m
+                    end
+                    if yl2 > 1e-10
+                        tot_t[tid] += yl2 * m
+                        tax_t[tid] += min(yl2, cap) * m
+                        nw_t[tid]  += m
+                    end
+                end
+            end
+        end
+
+        # Survivor1 payroll
+        for j in 1:nj
+            j >= Jr && continue
+            for iz1 in 1:nz
+                zv1 = exp(zg[iz1] + zp1 + grids.age_eff[j])
+                for ia in 1:na
+                    m = xd.x_s1[ia,iz1,j] * wp
+                    m < 1e-15 && continue
+                    yl1 = prices[:w]*zv1*hh.surv1.pol_n[ia,iz1,j]
+                    tot_t[tid] += yl1 * m
+                    tax_t[tid] += min(yl1,cap) * m
+                    nw_t[tid]  += m
+                end
+            end
+        end
+
+        # Survivor2 payroll
+        for j in 1:nj
+            j >= Jr && continue
+            for iz2 in 1:nz
+                zv2 = exp(zg[iz2] + zp2 + grids.age_eff[j])
+                for ia in 1:na
+                    m = xd.x_s2[ia,iz2,j] * wp
+                    m < 1e-15 && continue
+                    yl2 = prices[:w]*zv2*hh.surv2.pol_n[ia,iz2,j]
+                    tot_t[tid] += yl2 * m
+                    tax_t[tid] += min(yl2,cap) * m
+                    nw_t[tid]  += m
+                end
+            end
+        end
+    end
+
+    tot = sum(tot_t); tax = sum(tax_t); nw = sum(nw_t)
+    (total=tot, taxable=tax, n_workers=nw,
+     avg_earn=tot/max(nw,1e-10),
+     pct_above=1.0-tax/max(tot,1e-10))
+end
+
+# ============================================================
 # PARAMETERS
 # ============================================================
 
@@ -1318,16 +1407,13 @@ function create_params(; benefit_fn::Function=benefits_current_law,
                         aime_modifier=nothing)
     par = Dict{Symbol,Any}(
         :J_start  => 21,  :J_retire => 67, :J_max => 100, :n_ages => 80,
-        :n_years => 35,   :g_pop    => 0.000, :aime_nwc_frac => 0, 
-        :alpha    => 0.36, :delta => 0.06, :eta => 0.0,
+        :aime_years => 35,   :g_pop    => 0.000, :aime_nwc_frac => 0, 
+        :alpha    => 0.36, :delta => 0.06,
         :zeta_income_corp => 0.55, :zeta_income_pass => 0.45,
         :tau_statutory_corp => 0.21,
         :phi_exp_corp  => 0.50, :phi_int_corp => 1.00,
-        :zeta_taxbase_corp => 1.00, :zeta_ded_corp => 0.02,
-        :zeta_cred_corp => 0.01,  :zeta_other_corp => 0.02,
-        :tau_top_pit   => 0.37,
-        :phi_exp_pass  => 0.50, :phi_int_pass => 1.00, :zeta_other_pass => 0.02,
-        :nu1     => 3.5, :nu2 => nothing, :h => 1.0, :leverage_ratio_target => 0.32,
+        :zeta_ded_corp => 0.02,
+        :nu1     => 3.5, :nu2 => nothing, :leverage_ratio_target => 0.32,
         :beta    => 0.97, :gamma => 0.30, :sigma => 2.00,
         :first_rr => 0.9, :second_rr => 0.32, :third_rr => 0.15,
         # Permanent types (individual)
@@ -1337,7 +1423,7 @@ function create_params(; benefit_fn::Function=benefits_current_law,
         # Assortative mating
         :rho_assort => 0.6,
 
-        :sigma_trans  => 0.063, :sigma_pers => 0.007, :rho_pers => 0.990,
+        :sigma_pers => 0.007, :rho_pers => 0.990,
 
         # Individual (single/survivor) brackets
         :ord_brackets  => Float64[0,9700,39475,84200,160725,204100,510300],
@@ -1354,25 +1440,20 @@ function create_params(; benefit_fn::Function=benefits_current_law,
         :payroll_rate  => 0.106, :payroll_cap => 176100.0,
         :tau_con => 0.0, :tau_lumpsum => 0.0,
         :theta_corp_ORD  => 0.60, :theta_corp_PREF => 0.40,
-        :theta_lab_ORD   => 0.95, :theta_lab_PT    => 1.00,
+        :theta_lab_ORD   => 0.95,
         :theta_pass_ORD  => 1.00, :theta_ss_ORD    => 0.85,
         :ss_tax_thresh1  => 32000.0,  # MFJ thresholds
         :ss_tax_thresh2  => 44000.0,
         :ss_tax_use_provisional => true,
-        :ss_thresh_indexing => "cpi",
-        :ss_bend1_frac => 0.2335, :ss_bend2_frac => 1.4078, :ss_cap_frac => 2.796,
+        :ss_cap_frac => 2.796,
         :avg_wage_mu   => 1.0,
-        :ss_bend1 => 1226.0*12, :ss_bend2 => 7391.0*12, :ss_cap => 176100.0,
+        :ss_bend1 => 1226.0*12, :ss_bend2 => 7391.0*12,
         :r_G => 0.03, :debt_to_gdp => 0.78,
-        :G_residual_share => 0.18, :T_residual_share => 0.03,
-        :closure_year => 20, :r_K_world => 0.05,
-        :zeta_debt_foreign_takeup   => 0.40,
-        :zeta_capital_foreign_takeup => 0.50,
-        :tau_corp_FOR => 0.17, :tau_pass_FOR => 0.08,
+        :G_residual_share => 0.18,
         :n_a => 30, :n_z => 5,
         :a_min => 0.0, :a_max => 50.0,
-        :tol_vfi => 1e-6, :tol_equil => 1e-4,
-        :max_iter_vfi => 500, :max_iter_equil => 15,
+        :tol_equil => 1e-4,
+        :max_iter_equil => 15,
         :mu_dollar       => 50000.0,
         :target_avg_earn => 63000.0,
         :g_A_index       => 0.012,
@@ -1399,7 +1480,7 @@ function create_params(; benefit_fn::Function=benefits_current_law,
         :benefit_fn    => benefit_fn,
         :aime_modifier => aime_modifier,
     )
-    par[:spousal_cap] = compute_PIA(7.25*2080/12/par[:mu_dollar], par)
+    par[:spousal_cap] = compute_PIA(7.25*2080/par[:mu_dollar], par)  # annual min-wage earnings; AIME and bend points are annual
     par[:min_benefit_floor] = par[:min_benefit_floor_pct] * par[:fpl_single_2025] / par[:mu_dollar]
     par
 
@@ -1465,8 +1546,8 @@ end
 # ============================================================
 
 function solve_steady_state(par::Dict;
-                            benefit_fn::Function=benefits_current_law,
-                            aime_modifier=nothing)
+                            benefit_fn::Function = get(par, :benefit_fn, benefits_current_law),
+                            aime_modifier        = get(par, :aime_modifier, nothing))
     println("=== Solving Steady State (Couples Model) ===")
     @printf("  Benefit rule: %s\n", string(Symbol(benefit_fn)))
     @printf("  z=[%s]  p=[%s]  g_pop=%.3f  target_earn=\$%s\n",
@@ -1474,6 +1555,16 @@ function solve_steady_state(par::Dict;
             join(par[:p_perm_vals], "/"),
             par[:g_pop],
             format_comma(par[:target_avg_earn]))
+
+    # par is Dict{Symbol,Any}: a misspelled key (e.g. :payroll_tax_rate
+    # instead of :payroll_rate) is silently accepted and read by nothing.
+    # Warn on any key a fresh create_params() doesn't know about.
+    let known = union(Set(keys(create_params())),
+                      Set([:pi_approx, :nu2, :couple_types]))  # added at runtime by the solver
+        unk = setdiff(Set(keys(par)), known)
+        isempty(unk) ||
+            @warn "solve_steady_state: par has key(s) no function reads: $(join(sort!(string.(collect(unk))), ", ")) -- possible misspelling"
+    end
 
     build_couple_types(par)
     grids  = setup_grids(par)
@@ -1537,10 +1628,11 @@ function solve_steady_state(par::Dict;
         ps = payroll_stats_couples(par, grids, hh_list, x_list, prices)
         par[:mu_dollar]   = par[:target_avg_earn] / max(ps.avg_earn, 1e-10)
         par[:avg_wage_mu] = ps.avg_earn
-        # Params denominated in real dollars must be recomputed whenever
-        # mu_dollar is recalibrated, or they go stale relative to the final
-        # equilibrium.
-        par[:spousal_cap] = compute_PIA(7.25*2080/12/par[:mu_dollar], par)
+        # Real-dollar-denominated params must be recomputed whenever mu_dollar
+        # is recalibrated, or they go stale relative to the final equilibrium
+        # (both were previously only set once, at create_params() time, using
+        # the initial mu_dollar guess).
+        par[:spousal_cap] = compute_PIA(7.25*2080/par[:mu_dollar], par)  # annual min-wage earnings; AIME and bend points are annual
         haskey(par, :fpl_single_2025) && (par[:min_benefit_floor] =
             par[:min_benefit_floor_pct] * par[:fpl_single_2025] / par[:mu_dollar])
 
@@ -1584,7 +1676,7 @@ end
 # EXTRACT STEADY-STATE RATIOS
 # ============================================================
 
-function extract_ss_ratios(ss; benefit_fn::Function=benefits_current_law)
+function extract_ss_ratios(ss)
     par = ss.par; mu = par[:mu_dollar]
     ps  = payroll_stats_couples(par, ss.grids, ss.hh_list, ss.x_list, ss.prices)
     agg = ss.agg
@@ -1771,9 +1863,6 @@ function project_economy(
     end
     length(dep_path) < n_years &&
         (dep_path = vcat(dep_path, fill(dep_path[end], n_years - length(dep_path))))
-    # Every returned series has n_years elements, so trim as well as pad.
-    # The cached dep_fit has 76 elements and n_years is usually 75.
-    dep_path = dep_path[1:n_years]
 
     year_cal  = collect(start_year:(start_year+n_years-1))
     g_A_vec   = fill(g_A,       n_years)
@@ -1882,20 +1971,24 @@ function project_economy(
     # --- Precompute AIME and bend points for PIA factor indexing ---
     b1_mu = par[:ss_bend1] / mu
     b2_mu = par[:ss_bend2] / mu
+    # PIA factors from par (single mechanism, same as compute_PIA) instead of
+    # hardcoded 0.90/0.32/0.15 -- identical for current-law params, consistent
+    # when the base ss was solved with reformed replacement rates.
+    f1_cl = par[:first_rr]; f2_cl = par[:second_rr]; f3_cl = par[:third_rr]
     avg_aime_mu = b2_mu
     pia_base_level = base.ss_ben_per_retiree
     for _ in 1:20
-        pia_try = 0.90*min(avg_aime_mu, b1_mu) +
-                  0.32*max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
-                  0.15*max(0.0, avg_aime_mu - b2_mu)
+        pia_try = f1_cl*min(avg_aime_mu, b1_mu) +
+                  f2_cl*max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
+                  f3_cl*max(0.0, avg_aime_mu - b2_mu)
         err = pia_try - pia_base_level
-        mr  = avg_aime_mu <= b1_mu ? 0.90 : avg_aime_mu <= b2_mu ? 0.32 : 0.15
+        mr  = avg_aime_mu <= b1_mu ? f1_cl : avg_aime_mu <= b2_mu ? f2_cl : f3_cl
         avg_aime_mu -= err / max(mr, 0.01)
         avg_aime_mu  = max(avg_aime_mu, 0.01)
     end
-    pia_current_law = 0.90*min(avg_aime_mu, b1_mu) +
-                      0.32*max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
-                      0.15*max(0.0, avg_aime_mu - b2_mu)
+    pia_current_law = f1_cl*min(avg_aime_mu, b1_mu) +
+                      f2_cl*max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
+                      f3_cl*max(0.0, avg_aime_mu - b2_mu)
 
     trust_fund   = trust_fund_init
     avg_ben_real = base.ss_ben_per_retiree
@@ -1942,9 +2035,9 @@ function project_economy(
         if pia_factor_indexing && !isnothing(reform_year) && yr >= reform_year
             t_ref = findfirst(==(reform_year), year_cal)
             price_wage_ratio = isnothing(t_ref) ? 1.0 : cum_A[t_ref] / cum_A[t]
-            f1 = 0.90 * price_wage_ratio
-            f2 = 0.32 * price_wage_ratio
-            f3 = 0.15 * price_wage_ratio
+            f1 = f1_cl * price_wage_ratio
+            f2 = f2_cl * price_wage_ratio
+            f3 = f3_cl * price_wage_ratio
             pia_yr = f1*min(avg_aime_mu, b1_mu) +
                      f2*max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
                      f3*max(0.0, avg_aime_mu - b2_mu)
@@ -2204,7 +2297,14 @@ function static_score_economy(
     gdp_anchor                 = nothing,
     wages_to_gdp::Float64      = 0.46,
     baseline_proj              = nothing,
-    eliminates_cap::Bool       = false,   # Set true for full cap-elimination reforms.
+    eliminates_cap::Bool       = false,   # ← NEW: set true for full cap-elimination reforms
+    # COLA raise cap (mirrors project_economy): cap the dollar SIZE of each
+    # year's COLA raise on the existing benefit stock at
+    # chained_cpi * cola_cap_pct * FPL(t), FPL(t) grown at chained_cpi.
+    cola_cap::Bool             = false,
+    chained_cpi::Float64       = 0.021,
+    fpl_single_2025::Float64   = 15650.0,
+    cola_cap_pct::Float64      = 1.25,
 )
     @printf("=== Static Scoring %d years: %d-%d [%s] ===\n",
             n_years, start_year, start_year + n_years - 1, label)
@@ -2288,29 +2388,29 @@ function static_score_economy(
 
     b1_mu = par[:ss_bend1] / mu
     b2_mu = par[:ss_bend2] / mu
+    # PIA factors from par (single mechanism, same as compute_PIA); see
+    # matching comment in project_economy.
+    f1_cl = par[:first_rr]; f2_cl = par[:second_rr]; f3_cl = par[:third_rr]
     avg_aime_mu = b2_mu
     pia_base_level = base.ss_ben_per_retiree
     for _ in 1:20
-        pia_try = 0.90 * min(avg_aime_mu, b1_mu) +
-                  0.32 * max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
-                  0.15 * max(0.0, avg_aime_mu - b2_mu)
+        pia_try = f1_cl * min(avg_aime_mu, b1_mu) +
+                  f2_cl * max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
+                  f3_cl * max(0.0, avg_aime_mu - b2_mu)
         err = pia_try - pia_base_level
-        mr  = avg_aime_mu <= b1_mu ? 0.90 : avg_aime_mu <= b2_mu ? 0.32 : 0.15
+        mr  = avg_aime_mu <= b1_mu ? f1_cl : avg_aime_mu <= b2_mu ? f2_cl : f3_cl
         avg_aime_mu -= err / max(mr, 0.01)
         avg_aime_mu  = max(avg_aime_mu, 0.01)
     end
-    pia_current_law = 0.90 * min(avg_aime_mu, b1_mu) +
-                      0.32 * max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
-                      0.15 * max(0.0, avg_aime_mu - b2_mu)
+    pia_current_law = f1_cl * min(avg_aime_mu, b1_mu) +
+                      f2_cl * max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
+                      f3_cl * max(0.0, avg_aime_mu - b2_mu)
 
     if isnothing(dep_path)
         dep_path = build_dependency_path(n_years, dep_start=base.dep_ratio)
     end
     length(dep_path) < n_years &&
         (dep_path = vcat(dep_path, fill(dep_path[end], n_years - length(dep_path))))
-    # Every returned series has n_years elements, so trim as well as pad.
-    # The cached dep_fit has 76 elements and n_years is usually 75.
-    dep_path = dep_path[1:n_years]
 
     GDP_real                 = zeros(n_years)
     GDP_nominal              = zeros(n_years)
@@ -2341,6 +2441,13 @@ function static_score_economy(
 
     trust_fund   = trust_fund_init
     avg_ben_real = base.ss_ben_per_retiree
+
+    # COLA raise cap dollar path (only binds when cola_cap = true)
+    fpl_path_t          = [fpl_single_2025 * (1.0 + chained_cpi)^(t - 1) for t in 1:n_years]
+    cola_cap_dollar_vec = chained_cpi .* cola_cap_pct .* fpl_path_t
+    cola_cap && @printf("  COLA raise cap: \$%s/yr (yr 1) -> \$%s/yr (yr %d)\n",
+                        format_comma(round(cola_cap_dollar_vec[1])),
+                        format_comma(round(cola_cap_dollar_vec[n_years])), n_years)
 
     for t in 1:n_years
         yr = year_cal[t]
@@ -2385,9 +2492,9 @@ function static_score_economy(
         if pia_factor_indexing && reform_on
             t_ref            = findfirst(==(reform_year), year_cal)
             price_wage_ratio = isnothing(t_ref) ? 1.0 : cum_A[t_ref] / cum_A[t]
-            f1 = 0.90 * price_wage_ratio
-            f2 = 0.32 * price_wage_ratio
-            f3 = 0.15 * price_wage_ratio
+            f1 = f1_cl * price_wage_ratio
+            f2 = f2_cl * price_wage_ratio
+            f3 = f3_cl * price_wage_ratio
             pia_yr           = f1 * min(avg_aime_mu, b1_mu) +
                                f2 * max(0.0, min(avg_aime_mu, b2_mu) - b1_mu) +
                                f3 * max(0.0, avg_aime_mu - b2_mu)
@@ -2419,7 +2526,14 @@ function static_score_economy(
         new_ben_real_t = base.ss_ben_per_retiree * cum_new_ben[t] * new_ben_scale_t
 
         cola_erosion_t = (1.0 + cola_inf_vec[t]) / (1.0 + inf_vec[t])
-        avg_ben_real   = (1.0 - phi_t) * avg_ben_real * cola_erosion_t +
+        # COLA raise cap (ported from project_economy): cap the dollar raise
+        # on the existing stock; new claimants enter fresh at new_ben_real_t
+        # and receive no "raise" to cap.
+        existing_ben_nom_prev = avg_ben_real * mu * cum_price_lag[t]
+        raw_raise_nom_t       = existing_ben_nom_prev * (cola_erosion_t - 1.0)
+        raise_nom_t           = cola_cap ? min(raw_raise_nom_t, cola_cap_dollar_vec[t]) : raw_raise_nom_t
+        existing_ben_real_t   = (existing_ben_nom_prev + raise_nom_t) / (mu * cum_price_lag[t])
+        avg_ben_real   = (1.0 - phi_t) * existing_ben_real_t +
                          phi_t * new_ben_real_t
 
         avg_ben_nom      = avg_ben_real * mu * cum_price_lag[t]
@@ -2680,48 +2794,59 @@ end;
 function compare_projections(ss, ss_reform, year_reform;
                              trust_fund_rate::Float64 = 0.047,
                              trust_fund_init::Float64 = 2.8e12,
-                             ssa_score = nothing)
+                             ssa_score = nothing,
+                             # Macro assumptions were previously hardcoded and
+                             # dep_fit was read as a global; both now flow
+                             # through keywords (defaults keep old behavior).
+                             dep_path                 = dep_fit,
+                             n_years::Int             = 75,
+                             start_year::Int          = 2025,
+                             g_A::Float64             = 0.0113,
+                             g_pop::Float64           = 0.005,
+                             inflation::Float64       = 0.024,
+                             ss_cola                  = "wage",
+                             gdp_anchor               = 28e12)
 
     # ── Run projections ───────────────────────────────────────────────────
     dynamic = project_economy(ss,
         ss_reform        = ss_reform,
         reform_year      = year_reform,
-        n_years          = 75,
-        start_year       = 2025,
-        g_A              = 0.0113,
-        g_pop            = 0.005,
-        inflation        = 0.024,
-        dep_path         = dep_fit,
-        ss_cola          = "wage",
+        n_years          = n_years,
+        start_year       = start_year,
+        g_A              = g_A,
+        g_pop            = g_pop,
+        inflation        = inflation,
+        dep_path         = dep_path,
+        ss_cola          = ss_cola,
         trust_fund_init  = trust_fund_init,
         trust_fund_rate  = trust_fund_rate,
-        gdp_anchor       = 28e12)
+        gdp_anchor       = gdp_anchor)
 
     static_proj = static_score_economy(ss,
         ss_reform        = ss_reform,
         reform_year      = year_reform,
-        n_years          = 75,
-        start_year       = 2025,
-        g_A              = 0.0113,
-        g_pop            = 0.005,
-        inflation        = 0.024,
-        dep_path         = dep_fit,
-        ss_cola          = "wage",
+        n_years          = n_years,
+        start_year       = start_year,
+        g_A              = g_A,
+        g_pop            = g_pop,
+        inflation        = inflation,
+        dep_path         = dep_path,
+        ss_cola          = ss_cola,
         trust_fund_init  = trust_fund_init,
         trust_fund_rate  = trust_fund_rate,
-        gdp_anchor       = 28e12)
+        gdp_anchor       = gdp_anchor)
 
     baseline = project_economy(ss,
-        n_years          = 75,
-        start_year       = 2025,
-        g_A              = 0.0113,
-        g_pop            = 0.005,
-        inflation        = 0.024,
-        dep_path         = dep_fit,
-        ss_cola          = "wage",
+        n_years          = n_years,
+        start_year       = start_year,
+        g_A              = g_A,
+        g_pop            = g_pop,
+        inflation        = inflation,
+        dep_path         = dep_path,
+        ss_cola          = ss_cola,
         trust_fund_init  = trust_fund_init,
         trust_fund_rate  = trust_fund_rate,
-        gdp_anchor       = 28e12)
+        gdp_anchor       = gdp_anchor)
 
     n    = length(dynamic.year)
     disc = [1.0 / (1.0 + trust_fund_rate)^(t-1) for t in 1:n]
