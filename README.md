@@ -3,12 +3,11 @@
 This is an overlapping generations (OLG) model of the United States economy. The
 households in the model are married couples. Use the model to score Social
 Security reforms. To score a reform is to measure its effect on Social Security
-finances. The model comes from the Penn Wharton Budget Model OLG framework.
+finances. 
 
 ## The two parts of the model
 
-The model has two parts. Do not confuse them. Most mistakes with this model come
-from confusion between them.
+The model has two parts. 
 
 **1. The steady state.** The function `solve_steady_state` calculates a general
 equilibrium. Households choose how much to consume, save, and work. Wages and
@@ -20,8 +19,7 @@ slower of the two. It takes about 1 minute with 6 threads.
 states. It then calculates a 75 year path of Social Security finances in nominal
 dollars. The path includes taxable payroll, outlays, the trust fund, and the
 actuarial balance. Productivity, inflation, population, and the dependency ratio
-are exogenous inputs to this part. The score comes from this part. This part is
-fast. It takes a few seconds.
+are exogenous inputs to this part. The score comes from this part.
 
 To score a reform, solve a second steady state with the reform policy. Then give
 both steady states to `project_economy`. The projection moves from baseline
