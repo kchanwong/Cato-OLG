@@ -212,58 +212,5 @@ steady state.
 Keep the old cache file until you confirm that the new baseline projection still
 agrees with the Trustees Report.
 
-## Known problems
-
-These problems are in the code now. They can cause confusion.
-
-- `par` is a `Dict{Symbol,Any}`. If you spell a key incorrectly, Julia accepts
-  the key and no function reads it.
-- The key `par[:n_years]` is the number of years in the average for AIME, which
-  is 35. The keyword `n_years` of `project_economy` is the length of the
-  projection, which is 75. The two are not related.
-- 26 of the keys that `create_params` sets are never read. For the list,
-  refer to
-  [PARAMETERS.md](PARAMETERS.md#parameters-that-do-nothing).
-- The function `extract_ss_ratios` accepts a keyword `benefit_fn` and does not
-  use it.
-- The function `static_score_economy` does not have the COLA cap. It does not
-  accept `cola_cap`, `chained_cpi`, `fpl_single_2025`, or `cola_cap_pct`. If you
-  give it one of these keywords, Julia stops with an error. Therefore you cannot
-  make a static score of a COLA cap reform.
-- The function `compare_projections` reads the global variable `dep_fit` instead
-  of taking it as an argument. It also contains `g_A = 0.0113` and the other
-  macroeconomic assumptions in the code. Therefore its results do not agree with
-  a call to `project_economy` that uses different assumptions.
-- The function `compute_PIA` reads `par[:first_rr]`, `par[:second_rr]`, and
-  `par[:third_rr]`. But the `pia_factor_indexing` branch of `project_economy`
-  contains the values 0.90, 0.32, and 0.15 in the code. Use one mechanism or the
-  other, but not both.
-- The model indexes past earnings for AIME to the average wage at age 66. Under
-  current law the correct age is 60. The variable in `compute_aime_couples` has
-  the name `age_60_j`, but the code sets it to `67 - par[:J_start]`. The value
-  67 is in the code. Therefore the indexing does not follow `par[:J_retire]`
-  when you increase the retirement age.
-- The value of `par[:spousal_cap]` is much lower than the PIA of a full time
-  worker at the minimum wage. The code is
-  `compute_PIA(7.25*2080/12/par[:mu_dollar], par)`. AIME in this model is an
-  annual value, and the bend points are annual. But the division by 12 makes
-  the earnings a monthly value. In the cached baseline the cap is 0.023 model
-  units. Without the division by 12 it is 0.486. This affects
-  `benefits_capped_spousal` only.
-- The file `analysis/new_policies/no_tax_max.jl` sets
-  `par_reform[:payroll_tax_rate]`, which is not a parameter. Therefore the
-  reform steady state in that script is the same as the baseline. To remove the
-  taxable maximum, set `par[:payroll_cap] = Inf`.
-- `create_params` stores `benefit_fn` and `aime_modifier` in `par`, but no
-  function reads them. The keywords of `solve_steady_state` default to current
-  law and to `nothing`. Therefore a rule that you give only to `create_params`
-  has no effect, and the model prints `Benefit rule: benefits_current_law` and
-  continues without an error. Always give the rule to `solve_steady_state`.
-  Two scripts are affected. In `analysis/new_policies/primus_reform.jl` the
-  price indexing scenario and the combined scenario are scored under current law
-  benefits, not under `benefits_price_index_floor`. In
-  `analysis/new_policies/static_dynamic_no_tax_max.jl` the variable `par_nc` has
-  the same problem, but that script also gives the rule to
-  `solve_steady_state`, so its result is correct.
   A one line change to the defaults of `solve_steady_state` corrects this, at
   the cost of new numbers for the two `primus_reform.jl` scenarios.
