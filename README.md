@@ -123,6 +123,66 @@ The function `compare_projections(ss, ss_reform, reform_year)` calculates the
 baseline projection, the static projection, and the dynamic projection. It then
 prints the three results together.
 
+## Run in a container
+
+The file `run_job.jl` scores one reform without a script. It takes one JSON
+object. The object can set any model parameter and any projection keyword.
+
+```
+julia --threads=auto run_job.jl '<json>'     # A JSON string,
+julia --threads=auto run_job.jl job.json     # or a file.
+```
+
+The JSON object has these fields. All of them are optional.
+
+| Field | Default | Description |
+|---|---|---|
+| `label` | `"Reform"` | The name of the run in the printed output. |
+| `reform_year` | | The year in which the reform starts. A reform needs it. |
+| `params` | `{}` | The keys of `create_params()`. Refer to [docs/PARAMETERS.md](docs/PARAMETERS.md#1-model-parameters). The job stops if a key is not a parameter, so a spelling mistake is not silent. Give `"Inf"` for a parameter with no limit. |
+| `benefit_fn` | `"benefits_current_law"` | A benefit rule, by name. |
+| `aime_modifier` | `null` | `"caregiver_modifier"`, or nothing. |
+| `projection` | `{}` | The keywords of `project_economy` and `static_score_economy`. Refer to [docs/PARAMETERS.md](docs/PARAMETERS.md#2-projection-keywords). `dep_path` defaults to the cached `dep_fit`. The job gives each keyword to the function that accepts it. |
+| `static` | `true` | Add a static score. |
+| `output_prefix` | `"score"` | The name of the two output files. |
+
+**Caution:** a reform that changes the number of retirees also needs a different
+`dep_path`. Give the new path as a vector of numbers in `projection`. The file
+[`analysis/new_policies/raise_retirement_age.jl`](analysis/new_policies/raise_retirement_age.jl)
+shows how to scale the cached path.
+
+The job always calculates the baseline projection. With no `params`, no
+`benefit_fn` and no `aime_modifier`, it calculates the baseline only. In every
+other case it solves the reform steady state, then it calculates the dynamic
+score and the static score against the same baseline.
+
+The job writes `<output_prefix>.xlsx`, with one sheet for each projection, and
+`<output_prefix>.json`, with the headline results. Set `OUTPUT_DIR` to choose
+the local directory; it defaults to `/data`.
+
+### Build the image
+
+```
+docker build -t olg-model .
+```
+
+The image holds `cached_objects.jld2`, so each run starts from the same
+baseline. The build runs `run_job.jl --selftest`, which checks that the JSON
+becomes parameters of the correct type.
+
+### Run it on this machine
+
+The file `docker-compose.yml` mounts `./output` on `/data`, so the results of a
+job appear in the repository.
+
+```
+docker compose run --rm model '{"label":"FRA 70","reform_year":2034,
+    "output_prefix":"fra70","params":{"J_retire":70}}'
+```
+
+With no argument, the service runs the baseline. The container writes as root,
+so the files in `output/` belong to root.
+
 ## Documentation
 
 - [docs/PARAMETERS.md](docs/PARAMETERS.md) gives the meaning and the effect of
@@ -142,4 +202,6 @@ analysis/TEMPLATE.jl                The start point for a new analysis.
 analysis/new_policies/              Scores of reforms.
 analysis/counterfactuals/           Economic scenarios with no policy change.
 output/                             Spreadsheets that the scripts write.
+run_job.jl                          One reform from one JSON object.
+Dockerfile                          The container image.
 ```
