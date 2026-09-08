@@ -1,0 +1,7 @@
+.git
+analysis
+docs
+output
+*.png
+*.json
+!cached_objects.jld2

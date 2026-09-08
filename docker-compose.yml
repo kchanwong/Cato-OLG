@@ -1,0 +1,13 @@
+# Run one job on this machine. The results appear in ./output.
+#
+#   docker compose run --rm model '{"label":"FRA 70","reform_year":2034,
+#       "output_prefix":"fra70","params":{"J_retire":70}}'
+#
+# With no argument it runs the baseline, from the JSON in `command` below.
+
+services:
+  model:
+    build: .
+    volumes:
+      - ./output:/data
+    command: ['{"output_prefix": "baseline"}']
