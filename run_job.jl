@@ -62,8 +62,24 @@ function build_params(spec::AbstractDict)
     par
 end
 
+# The calibrated projection assumptions from the README. The cached dep_fit was
+# fitted under these values, so a job that sets none of them reproduces the
+# repo's baseline. A value in the job's "projection" object overrides each one.
+const CALIBRATED_PROJECTION = (
+    n_years         = 75,
+    start_year      = 2025,
+    g_A             = 0.0114,
+    g_pop           = 0.005,
+    inflation       = 0.024,
+    ss_cola         = "wage",
+    trust_fund_init = 2.8e12,
+    trust_fund_rate = 0.047,
+    gdp_anchor      = 28e12,
+)
+
 function projection_kwargs(spec::AbstractDict)
-    kw = Dict{Symbol,Any}(:dep_path => dep_fit)
+    kw = Dict{Symbol,Any}(pairs(CALIBRATED_PROJECTION))
+    kw[:dep_path] = dep_fit
     for (k, v) in spec
         key = Symbol(k)
         kw[key] = coerce_keyword(key, v)
@@ -200,6 +216,12 @@ function selftest()
     @assert kw[:scenario_periods][1][:year_start] === 2030
     @assert kw[:scenario_periods][1][:g_A] === 0.005
     @assert kw[:dep_path] === dep_fit                       # Cached path by default.
+    @assert kw[:inflation] === 0.024                        # Unset keys keep README values.
+
+    kw0 = projection_kwargs(Dict())                         # A job that sets nothing.
+    @assert kw0[:g_A] === 0.0114 && kw0[:inflation] === 0.024
+    @assert kw0[:trust_fund_init] === 2.8e12 && kw0[:trust_fund_rate] === 0.047
+    @assert kw0[:gdp_anchor] === 28e12 && kw0[:n_years] === 75
     @assert !haskey(drop(kw, PROJECT_ONLY), :cola_cap)
 
     @assert read_job("{\"label\": \"x\"}")["label"] == "x"
