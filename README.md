@@ -142,7 +142,7 @@ The JSON object has these fields. All of them are optional.
 | `params` | `{}` | The keys of `create_params()`. Refer to [docs/PARAMETERS.md](docs/PARAMETERS.md#1-model-parameters). The job stops if a key is not a parameter, so a spelling mistake is not silent. Give `"Inf"` for a parameter with no limit. |
 | `benefit_fn` | `"benefits_current_law"` | A benefit rule, by name. |
 | `aime_modifier` | `null` | `"caregiver_modifier"`, or nothing. |
-| `projection` | `{}` | The keywords of `project_economy` and `static_score_economy`. Refer to [docs/PARAMETERS.md](docs/PARAMETERS.md#2-projection-keywords). `dep_path` defaults to the cached `dep_fit`. The job gives each keyword to the function that accepts it. |
+| `projection` | `{}` | The keywords of `project_economy` and `static_score_economy`. Refer to [docs/PARAMETERS.md](docs/PARAMETERS.md#2-projection-keywords). A keyword that the job does not set takes the calibrated value from [How to run an analysis](#how-to-run-an-analysis) (`g_A` 0.0114, `inflation` 0.024, `trust_fund_init` 2.8e12, `trust_fund_rate` 0.047, `gdp_anchor` 28e12), not the function default. `dep_path` defaults to the cached `dep_fit`. The job gives each keyword to the function that accepts it. |
 | `static` | `true` | Add a static score. |
 | `output_prefix` | `"score"` | The name of the two output files. |
 
